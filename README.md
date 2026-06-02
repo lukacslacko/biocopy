@@ -67,6 +67,15 @@ counter ticks up as the soup assembles.
 its neighbor. A click only cuts the *inter-monomer* bond at that end — a head or
 tail is never severed from its own body, and no ball is ever deleted.
 
+**VR (WebXR).** On a headset whose browser supports immersive VR (e.g. a Quest 2 in
+the Meta Quest Browser), an **Enter VR** button appears. In VR the soup becomes an
+arm's-length molecular aquarium floating in front of you; point a controller's ray and
+pull the **trigger** to grab and drag a molecule, or squeeze the **grip** to cut a
+pointed head/tail. The button is hidden where immersive VR isn't available (e.g. a Mac
+with no headset), so the desktop experience is unchanged. Keep the soup modest in VR —
+a headset renders two eyes at a high refresh rate, and (unless its browser exposes
+WebGPU) the physics runs on the CPU.
+
 ## Run it
 
 A single self-contained file — no build step. Three.js loads from a CDN, so you just
@@ -101,6 +110,13 @@ for large soups — the physics then runs on the GPU (see implementation notes).
   (30000 balls) when the GPU is active. If WebGPU is missing or fails, it falls back
   to the CPU physics with the same behavior. The stats line shows **GPU** or **CPU**
   so you can tell which path is running.
+- **WebXR / VR.** All visuals live in a `simGroup` that the desktop leaves at identity
+  and VR shrinks/places in front of the viewer; the render loop uses
+  `renderer.setAnimationLoop` (with a re-entrancy guard so the async GPU readback can't
+  overlap an XR frame). Controllers raycast the instanced balls for grab/cut, reusing
+  the same pin constraint as the mouse drag. The Enter-VR button is added only when
+  `navigator.xr` reports `immersive-vr` is supported, so non-headset browsers are
+  untouched.
 - A `window.__dbg` handle (positions, counts, simulated cut/drag) is exposed for
   automated testing; it has no effect on behavior.
 
