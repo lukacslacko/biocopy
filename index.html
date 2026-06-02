@@ -138,11 +138,6 @@
     <input type="range" id="monomers" min="2" max="250" step="1" value="40" />
   </div>
 
-  <div class="field">
-    <div class="row"><label for="bindProb">Bind probability / frame</label><span class="val" id="bindProbVal">0.020</span></div>
-    <input type="range" id="bindProb" min="0" max="0.5" step="0.005" value="0.02" />
-  </div>
-
   <div class="buttons">
     <button id="regen">Fresh soup</button>
   </div>
@@ -156,6 +151,21 @@
     <div class="lrow"><span class="sw" id="sw-b3"></span> Body · monomer type D</div>
     <div class="lrow" style="opacity:.7">Free (unbound) ends glow brighter &amp; bulge.</div>
   </div>
+
+  <details open>
+    <summary>Chemistry</summary>
+
+    <div class="field" style="margin-top:6px">
+      <div class="row"><label for="bindProb">Bind probability / frame</label><span class="val" id="bindProbVal">0.020</span></div>
+      <input type="range" id="bindProb" min="0" max="0.5" step="0.005" value="0.02" />
+    </div>
+
+    <div class="field">
+      <div class="row"><label for="chem">Body affinity (like ↔ unlike)</label><span class="val" id="chemVal">0.00</span></div>
+      <input type="range" id="chem" min="-0.4" max="0.4" step="0.01" value="0" />
+    </div>
+    <p class="sub" style="margin:6px 0 2px; opacity:.7">+ like bodies attract &amp; unlike repel when very close · − reversed · acts only between different monomers.</p>
+  </details>
 
   <details>
     <summary>More settings</summary>
@@ -321,10 +331,12 @@ BODY_COLORS.forEach((c, i) => { document.getElementById('sw-b' + i).style.backgr
 // Simulation state
 // ---------------------------------------------------------------------------
 const MONOMER_LEN = 5;                 // 1 head + 3 body + 1 tail
+const CHEM_RANGE = 3.0;                // body-affinity "very close" band, × interact radius
 
 const cfg = {
   monomers: 40,
   bindProb: 0.02,       // per frame, per touching unbound (head, tail) pair
+  chem: 0,              // body affinity: + like-attract/unlike-repel, − reversed, 0 = off
   radius: 1.0,          // render radius: ball size (cosmetic only)
   interact: 1.0,        // interaction radius: collisions push apart within 2·interact
   bondLen: 1.0,         // bonded-center rest length as a factor of interact radius
@@ -351,6 +363,7 @@ let pos = new Float32Array(MAX_BALLS * 3);
 let vel = new Float32Array(MAX_BALLS * 3);
 const kind  = new Uint8Array(MAX_BALLS);   // HEAD / BODY / TAIL
 const mtype = new Uint8Array(MAX_BALLS);   // monomer type 0..3 (body color)
+const monomerId = new Uint16Array(MAX_BALLS); // which monomer a ball belongs to (body affinity skips same-monomer pairs)
 // Linear-chain connectivity: next[i] is the ball bonded after i (head→…→tail→next
 // monomer's head), prev[i] the one before. -1 = none. Intra-monomer bonds are fixed;
 // polymerization sets a tail's next to a free head (and that head's prev to the tail).
@@ -419,6 +432,7 @@ function spawnSoup() {
       vel[o] = vel[o + 1] = vel[o + 2] = 0;
       kind[i]  = (k === 0) ? HEAD : (k === MONOMER_LEN - 1) ? TAIL : BODY;
       mtype[i] = type;
+      monomerId[i] = m;
       next[i] = (k < MONOMER_LEN - 1) ? i + 1 : -1;   // head→…→tail
       prev[i] = (k > 0) ? i - 1 : -1;
     }
@@ -462,7 +476,12 @@ function step(dt) {
   const r = cfg.interact;
   const L0 = cfg.bondLen * r;            // bonded rest length
   const minDist = 2 * r;                 // non-bonded balls push apart inside this
-  const cell = minDist;
+  const chem = cfg.chem;                 // signed body-body affinity (0 = off)
+  const chemRange = CHEM_RANGE * r;      // "very close" band the affinity acts within
+  const chemRange2 = chemRange * chemRange;
+  // When affinity is on, widen the broad-phase cell to its (larger) range, so the
+  // very same neighbor scan that drives collisions also catches every affinity pair.
+  const cell = chem !== 0 ? Math.max(minDist, chemRange) : minDist;
   const K = cfg.ignoreK;
 
   force.fill(0, 0, n * 3);
@@ -506,16 +525,32 @@ function step(dt) {
       for (let b = 0; b < bucket.length; b++) {
         const j = bucket[b];
         if (j <= i) continue;            // each unordered pair once
-        if (withinK(i, j, K)) continue;  // exempt close bonded neighbors
 
         const dx = pos[j * 3] - pos[i * 3];
         const dy = pos[j * 3 + 1] - pos[i * 3 + 1];
         const dz = pos[j * 3 + 2] - pos[i * 3 + 2];
         const d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 >= minDist * minDist || d2 < 1e-12) continue;
-
-        pairs++;
+        if (d2 < 1e-12) continue;
         const dist = Math.sqrt(d2);
+
+        // --- Body affinity (chemistry): a slight short-range force between BODY balls
+        // of DIFFERENT monomers (same-monomer pairs are skipped; same-chain is fine).
+        // +chem: like types attract & unlike repel; −chem reverses it. The force ramps
+        // from full near contact to zero at chemRange. It deliberately ignores the
+        // K-neighbor collision exemption, so bodies of bonded monomers still feel it.
+        if (chem !== 0 && d2 < chemRange2 && kind[i] === BODY && kind[j] === BODY
+            && monomerId[i] !== monomerId[j]) {
+          const like = mtype[i] === mtype[j];
+          const s = chem * (like ? 1 : -1) * (chemRange - dist) / (chemRange * dist);
+          const ax = s * dx, ay = s * dy, az = s * dz;   // on i: toward j (s>0) / away (s<0)
+          force[i * 3] += ax;   force[i * 3 + 1] += ay;   force[i * 3 + 2] += az;
+          force[j * 3] -= ax;   force[j * 3 + 1] -= ay;   force[j * 3 + 2] -= az;
+        }
+
+        // --- Collision: push apart non-bonded balls within 2·r; skip K bonded neighbors.
+        if (withinK(i, j, K)) continue;
+        if (d2 >= minDist * minDist) continue;
+        pairs++;
         const overlap = minDist - dist;
         const inv = 1 / dist;
         const fx = -k_col * overlap * dx * inv;
@@ -772,6 +807,7 @@ function bindSlider(id, key, fmt, onChange) {
 
 bindSlider('monomers', 'monomers', v => v | 0, spawnSoup);
 bindSlider('bindProb', 'bindProb', v => v.toFixed(3));
+bindSlider('chem', 'chem', v => (v > 0 ? '+' : '') + v.toFixed(2));
 bindSlider('radius', 'radius', v => v.toFixed(2));
 bindSlider('interact', 'interact', v => v.toFixed(2));
 bindSlider('bondLen', 'bondLen', v => v.toFixed(2));
@@ -904,11 +940,12 @@ requestAnimationFrame(animate);
 
 // Debug handle for automated testing (harmless in production).
 window.__dbg = {
-  instMesh, camera, controls,
+  instMesh, camera, controls, cfg,
   get pos() { return pos; },
   get n() { return ballCount; },
   get kind() { return kind; },
   get mtype() { return mtype; },
+  get monomerId() { return monomerId; },
   get next() { return next; },
   get prev() { return prev; },
   cut(i) { return cutAt(i); },

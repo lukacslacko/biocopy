@@ -33,6 +33,14 @@ longer chains. It's a fork of the ball-and-spring look & feel from
   the chain. A head only binds a tail from a *different* molecule, so chains stay
   open rather than closing into rings. Free ends glow brighter and bulge slightly,
   so you can always see which sites are still reactive.
+- **Body affinity (chemistry).** A signed slider makes body balls of *different*
+  monomers interact at short range: at a positive setting **like** bodies (same
+  type/color) gently **attract** while **unlike** bodies **repel** when very close;
+  a negative setting reverses it; zero is off. It's evaluated in the same short-range
+  neighbor scan that drives collisions (no global all-pairs cost) and never acts
+  within a single monomer (same-chain is fine) — so you can coax the soup into
+  clusters and structure. This and the bind probability both live under the
+  **Chemistry** panel.
 
 The **molecules** counter (number of open chains) ticks down and the **bonds**
 counter ticks up as the soup assembles.
@@ -42,7 +50,8 @@ counter ticks up as the soup assembles.
 | Control | Effect |
 | --- | --- |
 | **Monomers (N)** | How many monomers a fresh soup contains (respawns). |
-| **Bind probability / frame** | Chance a touching unbound head+tail pair binds, per frame. 0 = no polymerization. |
+| **Bind probability / frame** | Chance a touching unbound head+tail pair binds, per frame. 0 = no polymerization. *(Chemistry panel.)* |
+| **Body affinity (like ↔ unlike)** | Short-range force between bodies of different monomers: + = like-attract/unlike-repel, − = reversed, 0 = off. *(Chemistry panel.)* |
 | **Fresh soup** | Scatter a new random soup. |
 | **Render radius** | Drawn ball size only — cosmetic, no effect on the sim. |
 | **Interact radius** | Drives the sim: collision distance is `2 · interact`. |
@@ -77,6 +86,9 @@ Any static server works (`npx serve`, etc.).
 - **Connectivity** is stored as per-ball `next`/`prev` links (a linear chain), so
   binding and cutting are just pointer edits and any ball index stays valid for the
   life of a soup. Springs follow bonds; collisions use a spatial-hash broad phase.
+  Body affinity rides that same broad phase — when it's on, the grid cell is widened
+  to the affinity range so one neighbor scan feeds both collisions and affinity — and
+  a per-ball monomer id lets it cheaply skip same-monomer pairs.
 - A `window.__dbg` handle (positions, counts, simulated cut/drag) is exposed for
   automated testing; it has no effect on behavior.
 
