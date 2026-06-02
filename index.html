@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BioCopy — a soup of self-assembling monomers</title>
+<style>
+  :root {
+    --bg: #0a0c12;
+    --panel: rgba(18, 22, 32, 0.82);
+    --panel-border: rgba(120, 140, 190, 0.18);
+    --ink: #e7ecf6;
+    --ink-dim: #9aa6c2;
+    --accent: #6ea8fe;
+    --accent-2: #f7768e;
+    --track: rgba(120, 140, 190, 0.22);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    background: radial-gradient(1200px 800px at 70% -10%, #131a2b 0%, var(--bg) 60%);
+    color: var(--ink);
+    font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  #app { position: fixed; inset: 0; }
+  canvas { display: block; }
+
+  #panel {
+    position: fixed; top: 16px; left: 16px; width: 286px;
+    max-height: calc(100vh - 32px);
+    overflow-y: auto; overscroll-behavior: contain;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 14px;
+    backdrop-filter: blur(14px) saturate(1.2);
+    -webkit-backdrop-filter: blur(14px) saturate(1.2);
+    box-shadow: 0 18px 50px rgba(0,0,0,0.45);
+    padding: 16px 16px 14px;
+    user-select: none;
+  }
+  #panel::-webkit-scrollbar { width: 8px; }
+  #panel::-webkit-scrollbar-thumb {
+    background: rgba(120, 140, 190, 0.35); border-radius: 8px;
+  }
+  #panel { scrollbar-width: thin; scrollbar-color: rgba(120,140,190,0.35) transparent; }
+  #panel h1 {
+    font-size: 14px; font-weight: 650; letter-spacing: 0.2px;
+    margin: 0 0 2px; display: flex; align-items: center; gap: 8px;
+  }
+  #panel h1 .dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    box-shadow: 0 0 12px var(--accent);
+  }
+  #panel .sub { color: var(--ink-dim); font-size: 11px; margin: 0 0 14px; }
+
+  .field { margin: 11px 0; }
+  .field .row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 5px; }
+  .field label { color: var(--ink-dim); font-size: 11.5px; letter-spacing: .2px; }
+  .field .val { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--ink); }
+
+  input[type=range] {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 4px; border-radius: 4px; background: var(--track);
+    outline: none; cursor: pointer;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 15px; height: 15px; border-radius: 50%;
+    background: var(--ink);
+    border: 2px solid var(--accent);
+    box-shadow: 0 2px 6px rgba(0,0,0,.5);
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 15px; height: 15px; border-radius: 50%;
+    background: var(--ink); border: 2px solid var(--accent);
+  }
+
+  .buttons { display: flex; gap: 8px; margin-top: 14px; }
+  button {
+    flex: 1; cursor: pointer; color: var(--ink);
+    background: rgba(110,168,254,0.14);
+    border: 1px solid rgba(110,168,254,0.35);
+    border-radius: 9px; padding: 9px 10px; font-size: 12.5px; font-weight: 600;
+    transition: background .15s, transform .05s;
+  }
+  button:hover { background: rgba(110,168,254,0.24); }
+  button:active { transform: translateY(1px); }
+  button.secondary {
+    background: rgba(120,140,190,0.10);
+    border-color: rgba(120,140,190,0.28);
+  }
+  button.secondary:hover { background: rgba(120,140,190,0.2); }
+
+  .toggles { display: flex; gap: 14px; margin-top: 12px; flex-wrap: wrap; }
+  .toggles label { display: flex; align-items: center; gap: 6px; color: var(--ink-dim); cursor: pointer; }
+  .toggles input { accent-color: var(--accent); }
+
+  details { margin-top: 12px; border-top: 1px solid var(--panel-border); padding-top: 8px; }
+  summary { cursor: pointer; color: var(--ink-dim); font-size: 11.5px; list-style: none; }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: "▸ "; color: var(--accent); }
+  details[open] summary::before { content: "▾ "; }
+
+  /* Color legend for the ball functionalities */
+  .legend { margin-top: 12px; border-top: 1px solid var(--panel-border); padding-top: 10px; }
+  .legend .lrow { display: flex; align-items: center; gap: 7px; margin: 4px 0; color: var(--ink-dim); font-size: 11.5px; }
+  .legend .sw { width: 12px; height: 12px; border-radius: 50%; box-shadow: 0 0 0 1px rgba(255,255,255,.12) inset; }
+
+  #stats {
+    position: fixed; bottom: 14px; left: 16px;
+    color: var(--ink-dim); font-size: 11px; font-variant-numeric: tabular-nums;
+    background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: 9px; padding: 7px 11px; backdrop-filter: blur(10px);
+  }
+  #stats b { color: var(--ink); font-weight: 600; }
+  #hint {
+    position: fixed; bottom: 14px; right: 16px;
+    font-size: 11px; text-align: right;
+  }
+  #hint .hint-dim { color: var(--ink-dim); opacity: .8; }
+  #hint .cut-hint {
+    background: #fff; color: #000; font-weight: 600;
+    padding: 2px 7px; border-radius: 6px; margin-left: 4px;
+    box-shadow: 0 1px 4px rgba(0,0,0,.35);
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div id="panel">
+  <h1><span class="dot"></span> BioCopy</h1>
+  <p class="sub">A soup of monomers jiggles, collides, and polymerizes head&nbsp;→&nbsp;tail.</p>
+
+  <div class="field">
+    <div class="row"><label for="monomers">Monomers (N)</label><span class="val" id="monomersVal">40</span></div>
+    <input type="range" id="monomers" min="2" max="250" step="1" value="40" />
+  </div>
+
+  <div class="field">
+    <div class="row"><label for="bindProb">Bind probability / frame</label><span class="val" id="bindProbVal">0.020</span></div>
+    <input type="range" id="bindProb" min="0" max="0.5" step="0.005" value="0.02" />
+  </div>
+
+  <div class="buttons">
+    <button id="regen">Fresh soup</button>
+  </div>
+
+  <div class="legend">
+    <div class="lrow"><span class="sw" id="sw-head"></span> Head — binds to a tail</div>
+    <div class="lrow"><span class="sw" id="sw-tail"></span> Tail — binds to a head</div>
+    <div class="lrow"><span class="sw" id="sw-b0"></span> Body · monomer type A</div>
+    <div class="lrow"><span class="sw" id="sw-b1"></span> Body · monomer type B</div>
+    <div class="lrow"><span class="sw" id="sw-b2"></span> Body · monomer type C</div>
+    <div class="lrow"><span class="sw" id="sw-b3"></span> Body · monomer type D</div>
+    <div class="lrow" style="opacity:.7">Free (unbound) ends glow brighter &amp; bulge.</div>
+  </div>
+
+  <details>
+    <summary>More settings</summary>
+
+    <div class="buttons" style="margin-top:10px">
+      <button id="pause" class="secondary">Pause</button>
+    </div>
+
+    <div class="toggles">
+      <label><input type="checkbox" id="shadows" checked /> Shadows</label>
+      <label><input type="checkbox" id="showBonds" /> Bonds</label>
+      <label><input type="checkbox" id="showContain" /> Boundary</label>
+    </div>
+
+    <div class="field">
+      <div class="row"><label for="radius">Render radius</label><span class="val" id="radiusVal">1.00</span></div>
+      <input type="range" id="radius" min="0.15" max="2.0" step="0.05" value="1.0" />
+    </div>
+
+    <div class="field">
+      <div class="row"><label for="interact">Interact radius</label><span class="val" id="interactVal">1.00</span></div>
+      <input type="range" id="interact" min="0.15" max="2.0" step="0.05" value="1.0" />
+    </div>
+
+    <div class="field">
+      <div class="row"><label for="bondLen">Bond length (× interact r)</label><span class="val" id="bondLenVal">1.00</span></div>
+      <input type="range" id="bondLen" min="0.4" max="2.0" step="0.05" value="1.0" />
+    </div>
+
+    <div class="field">
+      <div class="row"><label for="containR">Boundary radius</label><span class="val" id="containRVal">20</span></div>
+      <input type="range" id="containR" min="5" max="40" step="0.5" value="20" />
+    </div>
+
+    <div class="field">
+      <div class="row"><label for="containK">Boundary push (beyond R)</label><span class="val" id="containKVal">0.05</span></div>
+      <input type="range" id="containK" min="0" max="0.4" step="0.005" value="0.05" />
+    </div>
+
+    <div class="field">
+      <div class="row"><label for="ignoreK">Ignore K neighbors (collision)</label><span class="val" id="ignoreKVal">1</span></div>
+      <input type="range" id="ignoreK" min="0" max="5" step="1" value="1" />
+    </div>
+
+    <div class="field">
+      <div class="row"><label for="spring">Spring pull</label><span class="val" id="springVal">0.60</span></div>
+      <input type="range" id="spring" min="0" max="2" step="0.02" value="0.6" />
+    </div>
+    <div class="field">
+      <div class="row"><label for="collide">Collision push</label><span class="val" id="collideVal">1.00</span></div>
+      <input type="range" id="collide" min="0" max="2" step="0.02" value="1.0" />
+    </div>
+    <div class="field">
+      <div class="row"><label for="damp">Damping</label><span class="val" id="dampVal">0.90</span></div>
+      <input type="range" id="damp" min="0.5" max="0.99" step="0.01" value="0.9" />
+    </div>
+    <div class="field">
+      <div class="row"><label for="jiggle">Jiggle (thermal)</label><span class="val" id="jiggleVal">0.60</span></div>
+      <input type="range" id="jiggle" min="0" max="3" step="0.05" value="0.6" />
+    </div>
+    <div class="field">
+      <div class="row"><label for="speed">Sim substeps / frame</label><span class="val" id="speedVal">4</span></div>
+      <input type="range" id="speed" min="1" max="40" step="1" value="4" />
+    </div>
+  </details>
+</div>
+
+<div id="stats">balls <b id="ballCount">0</b> · molecules <b id="molCount">0</b> · bonds <b id="bondCount">0</b> · <b id="fps">0</b> fps</div>
+<div id="hint"><span class="hint-dim">drag empty space to orbit · scroll to zoom · right-drag to pan</span><span class="cut-hint">click a head/tail to cut · drag a ball to move it</span></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ---------------------------------------------------------------------------
+// Scene setup  (carried over from the `knot` look & feel; gravity/floor removed)
+// ---------------------------------------------------------------------------
+const appEl = document.getElementById('app');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+appEl.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const BG = 0x6a6f78;                 // grey backdrop so the balls read true
+scene.background = new THREE.Color(BG);
+scene.fog = new THREE.FogExp2(BG, 0.004);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.set(0, 8, 52);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 4;
+controls.maxDistance = 260;
+controls.target.set(0, 0, 0);        // the soup is kept centered on the origin
+
+// Lighting: a dominant key (the only shadow caster), a dim cool fill, and a rim.
+scene.add(new THREE.HemisphereLight(0xcdd8f2, 0x05070c, 0.4));
+scene.add(new THREE.AmbientLight(0xffffff, 0.12));
+const keyDirs = [
+  { color: 0xffffff, intensity: 3.0, pos: [ 12,  18,  12] }, // dominant key
+  { color: 0xbcd0ff, intensity: 0.75, pos: [-14,  -2,  -5] }, // dim cool fill
+  { color: 0x88aaff, intensity: 1.15, pos: [ -7,   9, -16] }, // back rim
+];
+let keyLight = null;
+keyDirs.forEach((d, idx) => {
+  const light = new THREE.DirectionalLight(d.color, d.intensity);
+  light.position.set(...d.pos);
+  scene.add(light);
+  if (idx === 0) keyLight = light;
+});
+keyLight.castShadow = true;
+keyLight.shadow.mapSize.set(2048, 2048);
+keyLight.shadow.camera.near = 1;
+keyLight.shadow.camera.far = 90;
+keyLight.shadow.camera.left = -30;
+keyLight.shadow.camera.right = 30;
+keyLight.shadow.camera.top = 30;
+keyLight.shadow.camera.bottom = -30;
+keyLight.shadow.bias = -0.0004;
+keyLight.shadow.normalBias = 0.06;
+
+// Boundary-sphere reference wireframe (toggleable) — shows the containment radius R.
+const containSphere = new THREE.Mesh(
+  new THREE.SphereGeometry(1, 32, 16),
+  new THREE.MeshBasicMaterial({ color: 0x6ea8fe, wireframe: true, transparent: true, opacity: 0.06 })
+);
+containSphere.visible = false;
+scene.add(containSphere);
+
+// ---------------------------------------------------------------------------
+// Functionality colors
+// ---------------------------------------------------------------------------
+const HEAD = 0, BODY = 1, TAIL = 2;            // ball kinds
+const HEAD_COLOR = new THREE.Color(0xff5252);  // reactive head
+const TAIL_COLOR = new THREE.Color(0x448aff);  // reactive tail
+const BODY_COLORS = [0x66bb6a, 0xffca28, 0xab47bc, 0xec407a].map(h => new THREE.Color(h)); // 4 monomer types
+const WHITE = new THREE.Color(0xffffff);
+const END_BULGE = 1.18;                         // free ends are drawn a touch larger
+
+// Paint the legend swatches.
+const css = c => '#' + c.getHexString();
+document.getElementById('sw-head').style.background = css(HEAD_COLOR);
+document.getElementById('sw-tail').style.background = css(TAIL_COLOR);
+BODY_COLORS.forEach((c, i) => { document.getElementById('sw-b' + i).style.background = css(c); });
+
+// ---------------------------------------------------------------------------
+// Simulation state
+// ---------------------------------------------------------------------------
+const MONOMER_LEN = 5;                 // 1 head + 3 body + 1 tail
+
+const cfg = {
+  monomers: 40,
+  bindProb: 0.02,       // per frame, per touching unbound (head, tail) pair
+  radius: 1.0,          // render radius: ball size (cosmetic only)
+  interact: 1.0,        // interaction radius: collisions push apart within 2·interact
+  bondLen: 1.0,         // bonded-center rest length as a factor of interact radius
+  containR: 20,         // balls beyond this radius are gently pushed back toward the origin
+  containK: 0.05,       // strength of that boundary push
+  ignoreK: 1,           // collision-exempt chain neighbors (1 = directly bonded only)
+  spring: 0.6,
+  collide: 1.0,
+  damp: 0.9,
+  jiggle: 0.6,          // thermal kick that keeps the soup mixing (drives binding)
+  substeps: 4,
+  paused: false,
+  showBonds: false,
+  showContain: false,
+  shadows: true,
+};
+
+const MAX_BALLS = 2000;                // 250 monomers × 5, with headroom
+
+// Per-ball state in fixed-capacity flat arrays; `ballCount` is the logical length.
+// Balls are NEVER created or destroyed after a soup is spawned (no LOD), so every
+// index is stable for the lifetime of a soup — drags and picks can trust them.
+let pos = new Float32Array(MAX_BALLS * 3);
+let vel = new Float32Array(MAX_BALLS * 3);
+const kind  = new Uint8Array(MAX_BALLS);   // HEAD / BODY / TAIL
+const mtype = new Uint8Array(MAX_BALLS);   // monomer type 0..3 (body color)
+// Linear-chain connectivity: next[i] is the ball bonded after i (head→…→tail→next
+// monomer's head), prev[i] the one before. -1 = none. Intra-monomer bonds are fixed;
+// polymerization sets a tail's next to a free head (and that head's prev to the tail).
+const next = new Int32Array(MAX_BALLS);
+const prev = new Int32Array(MAX_BALLS);
+let ballCount = 0;
+let colorsDirty = true;
+let lastPairCount = 0;
+
+// Dragging: while the user drags a ball it is PINNED to the pointer (in a
+// screen-facing plane at grab depth); the rest of the molecule follows via springs.
+let dragBall = -1;
+const dragWorld = new THREE.Vector3();
+let grabCandidate = null;              // {ball, downX, downY, pointerId} between press and drag/click
+
+const ballGeo = new THREE.SphereGeometry(1, 18, 14);
+const ballMat = new THREE.MeshStandardMaterial({ roughness: 0.5, metalness: 0.0 });
+let instMesh = new THREE.InstancedMesh(ballGeo, ballMat, MAX_BALLS);
+instMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+instMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BALLS * 3), 3);
+instMesh.count = 0;
+instMesh.castShadow = true;
+instMesh.receiveShadow = true;
+scene.add(instMesh);
+
+const tmpColor = new THREE.Color();
+let bondLines = null;                  // optional bond line overlay
+
+// ---------------------------------------------------------------------------
+// Soup generation
+// ---------------------------------------------------------------------------
+function randomInSphere(R) {
+  const u = Math.random();
+  const r = R * Math.cbrt(u);
+  const cosT = 2 * Math.random() - 1;
+  const sinT = Math.sqrt(1 - cosT * cosT);
+  const phi = 2 * Math.PI * Math.random();
+  return new THREE.Vector3(r * sinT * Math.cos(phi), r * sinT * Math.sin(phi), r * cosT);
+}
+function randomUnit() {
+  const cosT = 2 * Math.random() - 1;
+  const sinT = Math.sqrt(1 - cosT * cosT);
+  const phi = 2 * Math.PI * Math.random();
+  return new THREE.Vector3(sinT * Math.cos(phi), sinT * Math.sin(phi), cosT);
+}
+
+// Spawn a fresh soup: N straight monomers at random positions/orientations, all
+// unbound, of random types, inside the boundary sphere.
+function spawnSoup() {
+  const L0 = cfg.bondLen * cfg.interact;        // bonded rest length
+  const spawnR = Math.max(2, cfg.containR - 2 * cfg.interact);
+  ballCount = 0;
+  const dir = new THREE.Vector3();
+  const center = new THREE.Vector3();
+  for (let m = 0; m < cfg.monomers && ballCount + MONOMER_LEN <= MAX_BALLS; m++) {
+    const type = (Math.random() * BODY_COLORS.length) | 0;
+    center.copy(randomInSphere(spawnR));
+    dir.copy(randomUnit());
+    const base = ballCount;
+    for (let k = 0; k < MONOMER_LEN; k++) {
+      const i = base + k, o = i * 3;
+      // Lay the monomer out centered on `center` along `dir`, spaced one rest length apart.
+      pos[o]     = center.x + dir.x * (k - 2) * L0;
+      pos[o + 1] = center.y + dir.y * (k - 2) * L0;
+      pos[o + 2] = center.z + dir.z * (k - 2) * L0;
+      vel[o] = vel[o + 1] = vel[o + 2] = 0;
+      kind[i]  = (k === 0) ? HEAD : (k === MONOMER_LEN - 1) ? TAIL : BODY;
+      mtype[i] = type;
+      next[i] = (k < MONOMER_LEN - 1) ? i + 1 : -1;   // head→…→tail
+      prev[i] = (k > 0) ? i - 1 : -1;
+    }
+    ballCount += MONOMER_LEN;
+  }
+  colorsDirty = true;
+  rebuildBondLines();
+  refreshCounts();
+}
+
+// Walk to the head end (prev === -1) of i's molecule — its identity for cycle tests.
+function chainHead(i) {
+  let a = i, guard = 0;
+  while (prev[a] >= 0 && guard++ < MAX_BALLS) a = prev[a];
+  return a;
+}
+
+// ---------------------------------------------------------------------------
+// Physics  (no gravity, no floor — a soft boundary keeps the soup near the origin)
+// ---------------------------------------------------------------------------
+const hashGrid = new Map();
+function gridKey(ix, iy, iz) { return ix + ',' + iy + ',' + iz; }
+
+const force = new Float32Array(MAX_BALLS * 3);
+
+// True if balls i and j are within K bonds of each other along the chain. Chains are
+// linear, so the K-neighborhood is just up to K steps via next and via prev.
+function withinK(i, j, K) {
+  if (K <= 0) return false;
+  let a = i;
+  for (let s = 0; s < K; s++) { a = next[a]; if (a < 0) break; if (a === j) return true; }
+  a = i;
+  for (let s = 0; s < K; s++) { a = prev[a]; if (a < 0) break; if (a === j) return true; }
+  return false;
+}
+
+function step(dt) {
+  const n = ballCount;
+  const k_spring = cfg.spring;
+  const k_col = cfg.collide;
+  const r = cfg.interact;
+  const L0 = cfg.bondLen * r;            // bonded rest length
+  const minDist = 2 * r;                 // non-bonded balls push apart inside this
+  const cell = minDist;
+  const K = cfg.ignoreK;
+
+  force.fill(0, 0, n * 3);
+
+  // --- Springs: each existing bond (i → next[i]) pulls toward rest length L0.
+  for (let i = 0; i < n; i++) {
+    const j = next[i];
+    if (j < 0) continue;
+    const dx = pos[j * 3] - pos[i * 3];
+    const dy = pos[j * 3 + 1] - pos[i * 3 + 1];
+    const dz = pos[j * 3 + 2] - pos[i * 3 + 2];
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    const scale = dist > 1e-9 ? k_spring * (dist - L0) / dist : 0;
+    const fx = scale * dx, fy = scale * dy, fz = scale * dz;
+    force[i * 3] += fx;     force[i * 3 + 1] += fy;     force[i * 3 + 2] += fz;
+    force[j * 3] -= fx;     force[j * 3 + 1] -= fy;     force[j * 3 + 2] -= fz;
+  }
+
+  // --- Collisions: spatial-hash broad phase; skip the K nearest bonded neighbors.
+  hashGrid.clear();
+  for (let i = 0; i < n; i++) {
+    const ix = Math.floor(pos[i * 3] / cell);
+    const iy = Math.floor(pos[i * 3 + 1] / cell);
+    const iz = Math.floor(pos[i * 3 + 2] / cell);
+    const key = gridKey(ix, iy, iz);
+    let bucket = hashGrid.get(key);
+    if (!bucket) { bucket = []; hashGrid.set(key, bucket); }
+    bucket.push(i);
+  }
+
+  let pairs = 0;
+  for (let i = 0; i < n; i++) {
+    const cx = Math.floor(pos[i * 3] / cell);
+    const cy = Math.floor(pos[i * 3 + 1] / cell);
+    const cz = Math.floor(pos[i * 3 + 2] / cell);
+    for (let gx = -1; gx <= 1; gx++)
+    for (let gy = -1; gy <= 1; gy++)
+    for (let gz = -1; gz <= 1; gz++) {
+      const bucket = hashGrid.get(gridKey(cx + gx, cy + gy, cz + gz));
+      if (!bucket) continue;
+      for (let b = 0; b < bucket.length; b++) {
+        const j = bucket[b];
+        if (j <= i) continue;            // each unordered pair once
+        if (withinK(i, j, K)) continue;  // exempt close bonded neighbors
+
+        const dx = pos[j * 3] - pos[i * 3];
+        const dy = pos[j * 3 + 1] - pos[i * 3 + 1];
+        const dz = pos[j * 3 + 2] - pos[i * 3 + 2];
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 >= minDist * minDist || d2 < 1e-12) continue;
+
+        pairs++;
+        const dist = Math.sqrt(d2);
+        const overlap = minDist - dist;
+        const inv = 1 / dist;
+        const fx = -k_col * overlap * dx * inv;
+        const fy = -k_col * overlap * dy * inv;
+        const fz = -k_col * overlap * dz * inv;
+        force[i * 3] += fx;   force[i * 3 + 1] += fy;   force[i * 3 + 2] += fz;
+        force[j * 3] -= fx;   force[j * 3 + 1] -= fy;   force[j * 3 + 2] -= fz;
+      }
+    }
+  }
+  lastPairCount = pairs;
+
+  // --- Jiggle: random thermal kick on every ball (0 = off). Keeps the soup mixing.
+  if (cfg.jiggle > 0) {
+    const j = cfg.jiggle;
+    for (let i = 0; i < n * 3; i++) force[i] += (Math.random() * 2 - 1) * j;
+  }
+
+  // --- Soft boundary: balls past radius R feel a gentle spring back toward the origin.
+  if (cfg.containK > 0) {
+    const R = cfg.containR, kC = cfg.containK;
+    for (let i = 0; i < n; i++) {
+      const o = i * 3;
+      const x = pos[o], y = pos[o + 1], z = pos[o + 2];
+      const d = Math.sqrt(x * x + y * y + z * z);
+      if (d > R) {
+        const s = -kC * (d - R) / d;
+        force[o] += s * x; force[o + 1] += s * y; force[o + 2] += s * z;
+      }
+    }
+  }
+
+  // --- Integrate (damped semi-implicit Euler).
+  const damp = cfg.damp;
+  for (let i = 0; i < n * 3; i++) {
+    vel[i] = (vel[i] + force[i] * dt) * damp;
+    pos[i] += vel[i] * dt;
+  }
+
+  // Dragged ball: pinned hard to the pointer target every substep.
+  if (dragBall >= 0 && dragBall < n) {
+    const o = dragBall * 3;
+    pos[o] = dragWorld.x; pos[o + 1] = dragWorld.y; pos[o + 2] = dragWorld.z;
+    vel[o] = vel[o + 1] = vel[o + 2] = 0;
+  }
+}
+
+// Keep the soup centered on the origin so the camera always has something to look at.
+function recenter() {
+  if (dragBall >= 0) return;
+  const n = ballCount;
+  if (!n) return;
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++) { cx += pos[i * 3]; cy += pos[i * 3 + 1]; cz += pos[i * 3 + 2]; }
+  cx /= n; cy /= n; cz /= n;
+  for (let i = 0; i < n; i++) { pos[i * 3] -= cx; pos[i * 3 + 1] -= cy; pos[i * 3 + 2] -= cz; }
+}
+
+// ---------------------------------------------------------------------------
+// Polymerization: once per frame, touching unbound heads & tails may bind.
+// A free tail's `next` joins to a free head's `prev` (head ← tail), with the
+// tunable per-pair probability. Binding within the same molecule (which would
+// close a ring) is disallowed so polymers stay open chains.
+// ---------------------------------------------------------------------------
+const bindGrid = new Map();
+function tryBind() {
+  const p = cfg.bindProb;
+  if (p <= 0 || ballCount < 2) return;
+  const r = cfg.interact;
+  const bindDist = 2.4 * r;              // a touch beyond contact, so colliding ends can capture
+  const bindDist2 = bindDist * bindDist;
+  const cell = bindDist;
+  const n = ballCount;
+
+  // Hash all unbound heads so each unbound tail can find nearby ones cheaply.
+  bindGrid.clear();
+  for (let i = 0; i < n; i++) {
+    if (kind[i] !== HEAD || prev[i] >= 0) continue;
+    const ix = Math.floor(pos[i * 3] / cell);
+    const iy = Math.floor(pos[i * 3 + 1] / cell);
+    const iz = Math.floor(pos[i * 3 + 2] / cell);
+    const key = gridKey(ix, iy, iz);
+    let bucket = bindGrid.get(key);
+    if (!bucket) { bucket = []; bindGrid.set(key, bucket); }
+    bucket.push(i);
+  }
+  if (bindGrid.size === 0) return;
+
+  for (let t = 0; t < n; t++) {
+    if (kind[t] !== TAIL || next[t] >= 0) continue;   // only currently-free tails
+    const tx = pos[t * 3], ty = pos[t * 3 + 1], tz = pos[t * 3 + 2];
+    const cx = Math.floor(tx / cell), cy = Math.floor(ty / cell), cz = Math.floor(tz / cell);
+    let bound = false;
+    for (let gx = -1; gx <= 1 && !bound; gx++)
+    for (let gy = -1; gy <= 1 && !bound; gy++)
+    for (let gz = -1; gz <= 1 && !bound; gz++) {
+      const bucket = bindGrid.get(gridKey(cx + gx, cy + gy, cz + gz));
+      if (!bucket) continue;
+      for (let b = 0; b < bucket.length; b++) {
+        const h = bucket[b];
+        if (prev[h] >= 0) continue;                   // already consumed (bound earlier this frame)
+        const dx = pos[h * 3] - tx, dy = pos[h * 3 + 1] - ty, dz = pos[h * 3 + 2] - tz;
+        if (dx * dx + dy * dy + dz * dz > bindDist2) continue;
+        if (chainHead(t) === chainHead(h)) continue;  // same molecule → would form a ring
+        if (Math.random() >= p) continue;
+        next[t] = h; prev[h] = t;                     // form the head←tail bond
+        bound = true;
+        break;
+      }
+    }
+  }
+  colorsDirty = true;
+  refreshCounts();
+}
+
+// ---------------------------------------------------------------------------
+// Cutting: clicking a head or tail severs only its inter-monomer bond, so a
+// head/tail is never split from its own body. A head's `prev` (if any) is a tail
+// of the previous monomer; a tail's `next` (if any) is a head of the next one.
+// ---------------------------------------------------------------------------
+function cutAt(i) {
+  if (i < 0 || i >= ballCount) return false;
+  if (kind[i] === HEAD && prev[i] >= 0) {
+    const t = prev[i];                  // the tail bonded into this head
+    next[t] = -1; prev[i] = -1;
+  } else if (kind[i] === TAIL && next[i] >= 0) {
+    const h = next[i];                  // the head this tail is bonded to
+    prev[h] = -1; next[i] = -1;
+  } else {
+    return false;                       // body click, or an already-free end: no-op
+  }
+  colorsDirty = true;
+  refreshCounts();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Rendering sync
+// ---------------------------------------------------------------------------
+function syncInstances() {
+  const n = ballCount;
+  instMesh.count = n;
+  const r = cfg.radius;
+  const m = instMesh.instanceMatrix.array;
+  for (let i = 0; i < n; i++) {
+    const o = i * 16, b = i * 3;
+    // Free (unbound) heads/tails bulge slightly so reactive ends read at a glance.
+    const free = (kind[i] === HEAD && prev[i] < 0) || (kind[i] === TAIL && next[i] < 0);
+    const s = free ? r * END_BULGE : r;
+    m[o] = s;     m[o+1] = 0;  m[o+2] = 0;   m[o+3] = 0;
+    m[o+4] = 0;   m[o+5] = s;  m[o+6] = 0;   m[o+7] = 0;
+    m[o+8] = 0;   m[o+9] = 0;  m[o+10] = s;  m[o+11] = 0;
+    m[o+12] = pos[b]; m[o+13] = pos[b+1]; m[o+14] = pos[b+2]; m[o+15] = 1;
+  }
+  instMesh.instanceMatrix.needsUpdate = true;
+
+  if (colorsDirty) {
+    for (let i = 0; i < n; i++) {
+      const k = kind[i];
+      const base = k === BODY ? BODY_COLORS[mtype[i]] : k === HEAD ? HEAD_COLOR : TAIL_COLOR;
+      const free = (k === HEAD && prev[i] < 0) || (k === TAIL && next[i] < 0);
+      if (free) tmpColor.copy(base).lerp(WHITE, 0.42);   // brighter while reactive
+      else tmpColor.copy(base);
+      instMesh.setColorAt(i, tmpColor);
+    }
+    if (instMesh.instanceColor) instMesh.instanceColor.needsUpdate = true;
+    colorsDirty = false;
+  }
+}
+
+function rebuildBondLines() {
+  if (bondLines) { scene.remove(bondLines); bondLines.geometry.dispose(); bondLines.material.dispose(); bondLines = null; }
+  if (!cfg.showBonds) return;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAX_BALLS * 2 * 3), 3));
+  bondLines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.3 }));
+  bondLines.frustumCulled = false;
+  scene.add(bondLines);
+}
+function syncBondLines() {
+  if (!bondLines) return;
+  const arr = bondLines.geometry.attributes.position.array;
+  let s = 0;
+  for (let i = 0; i < ballCount; i++) {
+    const j = next[i];
+    if (j < 0) continue;
+    arr[s++] = pos[i*3]; arr[s++] = pos[i*3+1]; arr[s++] = pos[i*3+2];
+    arr[s++] = pos[j*3]; arr[s++] = pos[j*3+1]; arr[s++] = pos[j*3+2];
+  }
+  bondLines.geometry.setDrawRange(0, s / 3);
+  bondLines.geometry.attributes.position.needsUpdate = true;
+}
+
+// Stats: molecules = number of free heads (each open chain has exactly one);
+// bonds = number of inter-monomer (tail→head) links formed.
+function refreshCounts() {
+  let mol = 0, bonds = 0;
+  for (let i = 0; i < ballCount; i++) {
+    if (kind[i] === HEAD && prev[i] < 0) mol++;
+    if (kind[i] === TAIL && next[i] >= 0) bonds++;
+  }
+  document.getElementById('ballCount').textContent = ballCount;
+  document.getElementById('molCount').textContent = mol;
+  document.getElementById('bondCount').textContent = bonds;
+}
+
+// ---------------------------------------------------------------------------
+// Main loop
+// ---------------------------------------------------------------------------
+let lastT = performance.now();
+let fpsAccum = 0, fpsFrames = 0;
+const fpsEl = document.getElementById('fps');
+
+function animate() {
+  const now = performance.now();
+  const frameDt = Math.min((now - lastT) / 1000, 0.05);
+  lastT = now;
+
+  if (!cfg.paused && ballCount) {
+    const dt = 0.18;                     // fixed sim dt for stability
+    for (let s = 0; s < cfg.substeps; s++) step(dt);
+    recenter();
+    tryBind();                           // polymerization happens once per frame
+  }
+
+  syncInstances();
+  syncBondLines();
+
+  controls.update();
+  renderer.render(scene, camera);
+
+  fpsAccum += frameDt; fpsFrames++;
+  if (fpsAccum >= 0.5) {
+    fpsEl.textContent = Math.round(fpsFrames / fpsAccum);
+    fpsAccum = 0; fpsFrames = 0;
+  }
+  requestAnimationFrame(animate);
+}
+
+// ---------------------------------------------------------------------------
+// UI wiring
+// ---------------------------------------------------------------------------
+function bindSlider(id, key, fmt, onChange) {
+  const el = document.getElementById(id);
+  const valEl = document.getElementById(id + 'Val');
+  const update = () => {
+    cfg[key] = parseFloat(el.value);
+    if (valEl) valEl.textContent = fmt ? fmt(cfg[key]) : el.value;
+    if (onChange) onChange();
+  };
+  el.addEventListener('input', update);
+  update();
+}
+
+bindSlider('monomers', 'monomers', v => v | 0, spawnSoup);
+bindSlider('bindProb', 'bindProb', v => v.toFixed(3));
+bindSlider('radius', 'radius', v => v.toFixed(2));
+bindSlider('interact', 'interact', v => v.toFixed(2));
+bindSlider('bondLen', 'bondLen', v => v.toFixed(2));
+bindSlider('containR', 'containR', v => (v % 1 ? v.toFixed(1) : v), updateContainSphere);
+bindSlider('containK', 'containK', v => v.toFixed(3));
+bindSlider('ignoreK', 'ignoreK', v => v | 0);
+bindSlider('spring', 'spring', v => v.toFixed(2));
+bindSlider('collide', 'collide', v => v.toFixed(2));
+bindSlider('damp', 'damp', v => v.toFixed(2));
+bindSlider('jiggle', 'jiggle', v => v.toFixed(2));
+bindSlider('speed', 'substeps', v => v | 0);
+
+document.getElementById('regen').addEventListener('click', spawnSoup);
+
+const pauseBtn = document.getElementById('pause');
+pauseBtn.addEventListener('click', () => {
+  cfg.paused = !cfg.paused;
+  pauseBtn.textContent = cfg.paused ? 'Resume' : 'Pause';
+});
+
+document.getElementById('shadows').addEventListener('change', e => {
+  cfg.shadows = e.target.checked;
+  keyLight.castShadow = cfg.shadows;
+});
+document.getElementById('showBonds').addEventListener('change', e => {
+  cfg.showBonds = e.target.checked;
+  rebuildBondLines();
+});
+document.getElementById('showContain').addEventListener('change', e => {
+  cfg.showContain = e.target.checked;
+  updateContainSphere();
+});
+
+function updateContainSphere() {
+  containSphere.scale.setScalar(cfg.containR);
+  containSphere.visible = cfg.showContain;
+}
+
+// ---------------------------------------------------------------------------
+// Pointer gestures: a primary press on a ball captures the gesture (orbit off),
+// then resolves to a click-to-cut (released in place) or a drag (moved past the
+// threshold). Press on empty space is left to OrbitControls.
+// ---------------------------------------------------------------------------
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+const DRAG_THRESH = 6;
+const dragPlane = new THREE.Plane();
+const dragOffset = new THREE.Vector3();
+const dragHit = new THREE.Vector3();
+const camDir = new THREE.Vector3();
+
+function ndcFromEvent(e) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  ndc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  return ndc;
+}
+function pickBall(e) {
+  if (!ballCount) return -1;
+  raycaster.setFromCamera(ndcFromEvent(e), camera);
+  instMesh.computeBoundingSphere();
+  const hits = raycaster.intersectObject(instMesh);
+  return hits.length && hits[0].instanceId != null ? hits[0].instanceId : -1;
+}
+function startDrag(b, e) {
+  dragBall = b;
+  const o = b * 3;
+  dragWorld.set(pos[o], pos[o + 1], pos[o + 2]);
+  camera.getWorldDirection(camDir);
+  dragPlane.setFromNormalAndCoplanarPoint(camDir, dragWorld);
+  raycaster.setFromCamera(ndcFromEvent(e), camera);
+  if (raycaster.ray.intersectPlane(dragPlane, dragHit)) dragOffset.copy(dragWorld).sub(dragHit);
+  else dragOffset.set(0, 0, 0);
+}
+function updateDrag(e) {
+  raycaster.setFromCamera(ndcFromEvent(e), camera);
+  if (raycaster.ray.intersectPlane(dragPlane, dragHit)) dragWorld.copy(dragHit).add(dragOffset);
+}
+function endGesture(pointerId) {
+  if (pointerId != null && renderer.domElement.hasPointerCapture?.(pointerId))
+    renderer.domElement.releasePointerCapture(pointerId);
+  grabCandidate = null;
+  dragBall = -1;
+  controls.enabled = true;
+}
+
+renderer.domElement.addEventListener('pointerdown', e => {
+  if (e.button !== 0) return;
+  if (grabCandidate) { endGesture(grabCandidate.pointerId); return; }
+  const b = pickBall(e);
+  if (b < 0) return;                       // empty space → OrbitControls orbits/pans
+  controls.enabled = false;
+  grabCandidate = { ball: b, downX: e.clientX, downY: e.clientY, pointerId: e.pointerId };
+  try { renderer.domElement.setPointerCapture(e.pointerId); } catch (_) {}
+});
+renderer.domElement.addEventListener('pointermove', e => {
+  if (!grabCandidate || e.pointerId !== grabCandidate.pointerId) return;
+  if (dragBall < 0) {
+    const moved = Math.hypot(e.clientX - grabCandidate.downX, e.clientY - grabCandidate.downY);
+    if (moved <= DRAG_THRESH) return;
+    if (grabCandidate.ball >= ballCount) { endGesture(grabCandidate.pointerId); return; }
+    startDrag(grabCandidate.ball, e);
+  }
+  updateDrag(e);
+});
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!grabCandidate || e.pointerId !== grabCandidate.pointerId) return;
+  const wasDragging = dragBall >= 0;
+  const b = grabCandidate.ball;
+  endGesture(grabCandidate.pointerId);
+  if (!wasDragging && b >= 0 && b < ballCount) cutAt(b);   // released in place → cut if head/tail
+});
+renderer.domElement.addEventListener('pointercancel', e => {
+  if (grabCandidate && e.pointerId === grabCandidate.pointerId) endGesture(grabCandidate.pointerId);
+});
+
+// ---------------------------------------------------------------------------
+// Resize & boot
+// ---------------------------------------------------------------------------
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+updateContainSphere();
+spawnSoup();
+lastT = performance.now();
+requestAnimationFrame(animate);
+
+// Debug handle for automated testing (harmless in production).
+window.__dbg = {
+  instMesh, camera, controls,
+  get pos() { return pos; },
+  get n() { return ballCount; },
+  get kind() { return kind; },
+  get mtype() { return mtype; },
+  get next() { return next; },
+  get prev() { return prev; },
+  cut(i) { return cutAt(i); },
+  molecules() { let m = 0; for (let i = 0; i < ballCount; i++) if (kind[i] === HEAD && prev[i] < 0) m++; return m; },
+  bonds() { let b = 0; for (let i = 0; i < ballCount; i++) if (kind[i] === TAIL && next[i] >= 0) b++; return b; },
+  pinBall(i, x, y, z) { dragBall = i; dragWorld.set(x, y, z); },
+  releaseBall() { dragBall = -1; },
+  projectToScreen(i) {
+    const v = new THREE.Vector3(pos[i*3], pos[i*3+1], pos[i*3+2]).project(camera);
+    const rect = renderer.domElement.getBoundingClientRect();
+    return { x: (v.x * 0.5 + 0.5) * rect.width + rect.left, y: (-v.y * 0.5 + 0.5) * rect.height + rect.top };
+  },
+};
+</script>
+</body>
+</html>
