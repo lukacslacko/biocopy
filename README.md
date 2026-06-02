@@ -67,14 +67,23 @@ counter ticks up as the soup assembles.
 its neighbor. A click only cuts the *inter-monomer* bond at that end — a head or
 tail is never severed from its own body, and no ball is ever deleted.
 
-**VR (WebXR).** On a headset whose browser supports immersive VR (e.g. a Quest 2 in
-the Meta Quest Browser), an **Enter VR** button appears. In VR the soup becomes an
-arm's-length molecular aquarium floating in front of you; point a controller's ray and
-pull the **trigger** to grab and drag a molecule, or squeeze the **grip** to cut a
-pointed head/tail. The button is hidden where immersive VR isn't available (e.g. a Mac
-with no headset), so the desktop experience is unchanged. Keep the soup modest in VR —
-a headset renders two eyes at a high refresh rate, and (unless its browser exposes
-WebGPU) the physics runs on the CPU.
+**VR (WebXR).** An **Enter VR** button appears wherever the browser exposes immersive
+VR. In VR the soup becomes an arm's-length molecular aquarium floating in front of you;
+point a controller's ray and pull the **trigger** to grab and drag a molecule, or
+squeeze the **grip** to cut a pointed head/tail. Two ways to run it:
+
+- **Standalone on a Quest** (Meta Quest Browser): everything runs on the headset.
+  Rendering is fine, but the Quest browser ships no WebGPU by default, so physics falls
+  back to the CPU — keep the soup modest.
+- **PCVR on Windows** (Quest Link over USB‑C, or Air Link): open the page in desktop
+  Chrome/Edge with the Meta Quest Link app running and the headset connected. The PC's
+  GPU does *both* the WebGPU physics and the rendering, and Quest Link only presents the
+  finished frames to the headset — so the powerful PC GPU does the heavy lifting and you
+  can push far higher ball counts. This is the high-performance path.
+
+The button is hidden where immersive VR isn't available — including on **macOS**, where
+tethered PCVR to a Quest isn't possible (Meta's Quest Link is Windows‑only and
+SteamVR‑on‑Mac is discontinued), so a Mac stays a (very capable) desktop renderer.
 
 ## Run it
 
@@ -111,12 +120,14 @@ for large soups — the physics then runs on the GPU (see implementation notes).
   to the CPU physics with the same behavior. The stats line shows **GPU** or **CPU**
   so you can tell which path is running.
 - **WebXR / VR.** All visuals live in a `simGroup` that the desktop leaves at identity
-  and VR shrinks/places in front of the viewer; the render loop uses
-  `renderer.setAnimationLoop` (with a re-entrancy guard so the async GPU readback can't
-  overlap an XR frame). Controllers raycast the instanced balls for grab/cut, reusing
-  the same pin constraint as the mouse drag. The Enter-VR button is added only when
-  `navigator.xr` reports `immersive-vr` is supported, so non-headset browsers are
-  untouched.
+  and VR shrinks/places in front of the viewer. The loop runs on
+  `renderer.setAnimationLoop`, and **rendering is decoupled from physics**: every XR
+  frame renders from the latest positions while a physics step (including the async GPU
+  position readback) runs fire-and-forget, so head tracking stays smooth even if a step
+  hitches — positions just trail by a frame or two under load. Controllers raycast the
+  instanced balls for grab/cut, reusing the same pin constraint as the mouse drag. The
+  Enter-VR button is added only when `navigator.xr` reports `immersive-vr` is supported,
+  so non-headset browsers are untouched.
 - A `window.__dbg` handle (positions, counts, simulated cut/drag) is exposed for
   automated testing; it has no effect on behavior.
 

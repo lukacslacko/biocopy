@@ -1040,39 +1040,30 @@ let lastT = performance.now();
 let fpsAccum = 0, fpsFrames = 0;
 const fpsEl = document.getElementById('fps');
 
-let frameBusy = false;
-async function animate() {
-  if (frameBusy) return;               // a prior async frame (GPU readback) is still in flight
-  frameBusy = true;
+// Physics is decoupled from rendering. Each frame we KICK a step without awaiting it,
+// so the headset still gets a fresh, pose-correct frame every XR tick even while a GPU
+// position readback is in flight — under load the positions just trail by a frame or
+// two. The guard keeps at most one step in flight at a time.
+let physicsBusy = false;
+async function runPhysics() {
+  if (physicsBusy || cfg.paused || !ballCount) return;
+  physicsBusy = true;
   try {
-  const now = performance.now();
-  const frameDt = Math.min((now - lastT) / 1000, 0.05);
-  lastT = now;
-
-  updateVRDrag();                      // in VR, track the grabbed ball to the controller ray
-
-  if (!cfg.paused && ballCount) {
     if (gpu) {
-      try {
-        if (gpuBondsDirty) { gpu.uploadBonds(ballCount); gpuBondsDirty = false; }   // bind/cut edits → GPU
-        if (dragBall >= 0 && dragBall < ballCount) {                                // hold the dragged ball
-          const o = dragBall * 3;
-          pos[o] = dragWorld.x; pos[o + 1] = dragWorld.y; pos[o + 2] = dragWorld.z;
-          vel[o] = vel[o + 1] = vel[o + 2] = 0;
-          gpu.pinUpload(dragBall);
-        }
-        gpu.step(ballCount, cfg.substeps);
-        await gpu.readPositions(ballCount);   // refresh the CPU mirror for rendering + binding
-        tryBind();                            // polymerization runs on the CPU each frame
-        if (++gpuTick >= GPU_RECENTER_INTERVAL) {   // occasional recenter to bound any slow drift
-          gpuTick = 0;
-          recenter();
-          gpu.uploadPositions(ballCount);
-        }
-      } catch (e) {
-        console.error('GPU physics failed, falling back to CPU:', e);
-        gpu = null;
-        document.getElementById('mode').textContent = 'CPU (gpu error)';
+      if (gpuBondsDirty) { gpu.uploadBonds(ballCount); gpuBondsDirty = false; }   // bind/cut edits → GPU
+      if (dragBall >= 0 && dragBall < ballCount) {                                // hold the dragged ball
+        const o = dragBall * 3;
+        pos[o] = dragWorld.x; pos[o + 1] = dragWorld.y; pos[o + 2] = dragWorld.z;
+        vel[o] = vel[o + 1] = vel[o + 2] = 0;
+        gpu.pinUpload(dragBall);
+      }
+      gpu.step(ballCount, cfg.substeps);
+      await gpu.readPositions(ballCount);   // refresh the CPU mirror for rendering + binding
+      tryBind();                            // polymerization runs on the CPU each frame
+      if (++gpuTick >= GPU_RECENTER_INTERVAL) {   // occasional recenter to bound any slow drift
+        gpuTick = 0;
+        recenter();
+        gpu.uploadPositions(ballCount);
       }
     } else {
       const dt = 0.18;                     // fixed sim dt for stability
@@ -1080,11 +1071,25 @@ async function animate() {
       recenter();
       tryBind();                           // polymerization happens once per frame
     }
+  } catch (e) {
+    console.error('GPU physics failed, falling back to CPU:', e);
+    gpu = null;
+    document.getElementById('mode').textContent = 'CPU (gpu error)';
+  } finally {
+    physicsBusy = false;
   }
+}
 
-  syncInstances();
+function animate() {
+  const now = performance.now();
+  const frameDt = Math.min((now - lastT) / 1000, 0.05);
+  lastT = now;
+
+  updateVRDrag();                      // in VR, track the grabbed ball to the controller ray
+  runPhysics();                        // fire-and-forget: never blocks this frame's render
+
+  syncInstances();                     // render from the latest positions we have
   syncBondLines();
-
   if (!renderer.xr.isPresenting) controls.update();   // head tracking replaces orbit in VR
   renderer.render(scene, camera);
 
@@ -1093,7 +1098,6 @@ async function animate() {
     fpsEl.textContent = Math.round(fpsFrames / fpsAccum);
     fpsAccum = 0; fpsFrames = 0;
   }
-  } finally { frameBusy = false; }
 }
 
 // ---------------------------------------------------------------------------
