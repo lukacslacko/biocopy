@@ -77,7 +77,8 @@ python3 -m http.server 8000
 # then open http://localhost:8000/
 ```
 
-Any static server works (`npx serve`, etc.).
+Any static server works (`npx serve`, etc.). A WebGPU-capable browser is recommended
+for large soups — the physics then runs on the GPU (see implementation notes).
 
 ## Implementation notes
 
@@ -89,6 +90,17 @@ Any static server works (`npx serve`, etc.).
   Body affinity rides that same broad phase — when it's on, the grid cell is widened
   to the affinity range so one neighbor scan feeds both collisions and affinity — and
   a per-ball monomer id lets it cheaply skip same-monomer pairs.
+- **GPU acceleration (WebGPU).** When the browser exposes WebGPU, the entire
+  per-substep physics — springs along bonds, a uniform-grid collision broad phase
+  (atomic binning) with the K-neighbor skip, body affinity, jiggle, the soft
+  boundary, and the integrate — runs in a compute shader on the GPU. Positions are
+  read back each frame to drive the instanced rendering; polymerization and cutting
+  run on the CPU and re-upload only the changed bonds (a ball's index never moves, so
+  the per-ball kind/type/monomer attributes upload once per soup). This lifts the
+  ceiling to tens of thousands of balls — the **Monomers** slider opens up to 6000
+  (30000 balls) when the GPU is active. If WebGPU is missing or fails, it falls back
+  to the CPU physics with the same behavior. The stats line shows **GPU** or **CPU**
+  so you can tell which path is running.
 - A `window.__dbg` handle (positions, counts, simulated cut/drag) is exposed for
   automated testing; it has no effect on behavior.
 

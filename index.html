@@ -135,7 +135,7 @@
 
   <div class="field">
     <div class="row"><label for="monomers">Monomers (N)</label><span class="val" id="monomersVal">40</span></div>
-    <input type="range" id="monomers" min="2" max="250" step="1" value="40" />
+    <input type="range" id="monomers" min="2" max="400" step="1" value="40" />
   </div>
 
   <div class="buttons">
@@ -233,7 +233,7 @@
   </details>
 </div>
 
-<div id="stats">balls <b id="ballCount">0</b> · molecules <b id="molCount">0</b> · bonds <b id="bondCount">0</b> · <b id="fps">0</b> fps</div>
+<div id="stats">balls <b id="ballCount">0</b> · molecules <b id="molCount">0</b> · bonds <b id="bondCount">0</b> · <b id="fps">0</b> fps · <b id="mode">…</b></div>
 <div id="hint"><span class="hint-dim">drag empty space to orbit · scroll to zoom · right-drag to pan</span><span class="cut-hint">click a head/tail to cut · drag a ball to move it</span></div>
 
 <script type="importmap">
@@ -354,7 +354,7 @@ const cfg = {
   shadows: true,
 };
 
-const MAX_BALLS = 2000;                // 250 monomers × 5, with headroom
+const MAX_BALLS = 40000;               // headroom for the GPU path (CPU stays well below this)
 
 // Per-ball state in fixed-capacity flat arrays; `ballCount` is the logical length.
 // Balls are NEVER created or destroyed after a soup is spawned (no LOD), so every
@@ -369,9 +369,17 @@ const monomerId = new Uint16Array(MAX_BALLS); // which monomer a ball belongs to
 // polymerization sets a tail's next to a free head (and that head's prev to the tail).
 const next = new Int32Array(MAX_BALLS);
 const prev = new Int32Array(MAX_BALLS);
+// Per-ball attributes packed into one u32 for the GPU: kind(2) | mtype(2) | monomerId(28).
+// Set once per spawn (never changes), so the GPU only needs it re-uploaded on respawn.
+const attr = new Uint32Array(MAX_BALLS);
 let ballCount = 0;
 let colorsDirty = true;
 let lastPairCount = 0;
+
+// GPU physics engine (WebGPU), or null when unavailable → the CPU step() runs instead.
+let gpu = null;
+let gpuBondsDirty = false;              // next/prev changed (bind/cut) → re-upload before next GPU step
+let gpuTick = 0;                        // frames since the last GPU-mode recenter
 
 // Dragging: while the user drags a ball it is PINNED to the pointer (in a
 // screen-facing plane at grab depth); the rest of the molecule follows via springs.
@@ -433,6 +441,7 @@ function spawnSoup() {
       kind[i]  = (k === 0) ? HEAD : (k === MONOMER_LEN - 1) ? TAIL : BODY;
       mtype[i] = type;
       monomerId[i] = m;
+      attr[i] = kind[i] | (mtype[i] << 2) | (m << 4);
       next[i] = (k < MONOMER_LEN - 1) ? i + 1 : -1;   // head→…→tail
       prev[i] = (k > 0) ? i - 1 : -1;
     }
@@ -441,6 +450,7 @@ function spawnSoup() {
   colorsDirty = true;
   rebuildBondLines();
   refreshCounts();
+  if (gpu) { gpu.uploadAll(ballCount); gpuBondsDirty = false; }   // push the fresh soup to the GPU
 }
 
 // Walk to the head end (prev === -1) of i's molecule — its identity for cycle tests.
@@ -639,6 +649,7 @@ function tryBind() {
   }
   if (bindGrid.size === 0) return;
 
+  let any = false;
   for (let t = 0; t < n; t++) {
     if (kind[t] !== TAIL || next[t] >= 0) continue;   // only currently-free tails
     const tx = pos[t * 3], ty = pos[t * 3 + 1], tz = pos[t * 3 + 2];
@@ -657,13 +668,12 @@ function tryBind() {
         if (chainHead(t) === chainHead(h)) continue;  // same molecule → would form a ring
         if (Math.random() >= p) continue;
         next[t] = h; prev[h] = t;                     // form the head←tail bond
-        bound = true;
+        bound = true; any = true;
         break;
       }
     }
   }
-  colorsDirty = true;
-  refreshCounts();
+  if (any) { colorsDirty = true; gpuBondsDirty = true; refreshCounts(); }
 }
 
 // ---------------------------------------------------------------------------
@@ -683,6 +693,7 @@ function cutAt(i) {
     return false;                       // body click, or an already-free end: no-op
   }
   colorsDirty = true;
+  gpuBondsDirty = true;
   refreshCounts();
   return true;
 }
@@ -758,22 +769,304 @@ function refreshCounts() {
 }
 
 // ---------------------------------------------------------------------------
+// WebGPU physics engine (optional; falls back to the CPU step() above).
+//
+// The GPU owns the authoritative positions/velocities and runs the whole
+// per-substep physics — springs along bonds, a uniform-grid collision broad
+// phase (atomic binning) with the K-neighbor skip, the body-affinity force, the
+// jiggle, the soft boundary, and the integrate. It mirrors the CPU step() exactly.
+// Each frame the CPU reads positions back to drive the instanced rendering and to
+// run polymerization/cutting (which edit next/prev); those edits are re-uploaded
+// before the next step. Topology never changes a ball's index, so the per-ball
+// attribute buffer (kind/type/monomer) is uploaded once per spawn. If WebGPU is
+// missing or fails, gpu stays null and the CPU path runs unchanged.
+// ---------------------------------------------------------------------------
+const GRID_CAP = 64;                  // uniform-grid resolution cap per axis (64³ cells)
+const CELL_CAP = 64;                  // max balls tracked per cell (overflow checks dropped)
+const WORLD_MIN = -60, WORLD_SIZE = 120;   // simulation box [-60, 60] per axis (boundary R ≤ 40)
+const GPU_RECENTER_INTERVAL = 30;     // frames between GPU-mode recenters (bounds slow drift)
+
+const PHYS_WGSL = /* wgsl */`
+struct Params {
+  n: u32, gridDim: u32, ignoreK: u32, frameSeed: u32,
+  dt: f32, kSpring: f32, kCol: f32, interact: f32,
+  minDist: f32, jiggle: f32, damp: f32, chem: f32,
+  chemRange: f32, chemRange2: f32, restLen: f32, cellSize: f32,
+  worldMin: f32, cellCap: u32, containR: f32, containK: f32,
+  pinIdx: u32, pinFlag: u32,
+};
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read_write> pos: array<f32>;
+@group(0) @binding(2) var<storage, read_write> vel: array<f32>;
+@group(0) @binding(3) var<storage, read_write> force: array<f32>;
+@group(0) @binding(4) var<storage, read_write> cellCount: array<atomic<u32>>;
+@group(0) @binding(5) var<storage, read_write> cellItems: array<u32>;
+@group(0) @binding(6) var<storage, read> nxt: array<i32>;   // next[i], or -1
+@group(0) @binding(7) var<storage, read> prv: array<i32>;   // prev[i], or -1
+@group(0) @binding(8) var<storage, read> attr: array<u32>;  // kind(2) | type(2) | monomer(28)
+
+fn pv(i: u32) -> vec3<f32> { return vec3<f32>(pos[3u*i], pos[3u*i+1u], pos[3u*i+2u]); }
+fn springForce(d: vec3<f32>) -> vec3<f32> {           // d = neighbor - self
+  let l = length(d);
+  if (l < 1e-6) { return vec3<f32>(0.0); }
+  return (P.kSpring * (l - P.restLen) / l) * d;
+}
+fn axis(v: f32) -> i32 { return clamp(i32(floor((v - P.worldMin) / P.cellSize)), 0, i32(P.gridDim) - 1); }
+fn cellOf(p: vec3<f32>) -> u32 { return (u32(axis(p.z))*P.gridDim + u32(axis(p.y)))*P.gridDim + u32(axis(p.x)); }
+fn hash1(s: u32) -> f32 {
+  var x = s * 747796405u + 2891336453u;
+  x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
+  x = (x >> 22u) ^ x;
+  return f32(x) / 4294967296.0;
+}
+// Within K bonds of i along the chain? Linear chain → walk next, then prev, up to K.
+fn withinK(i: u32, j: u32) -> bool {
+  if (P.ignoreK == 0u) { return false; }
+  var a: i32 = i32(i);
+  for (var s = 0u; s < P.ignoreK; s = s + 1u) { a = nxt[a]; if (a < 0) { break; } if (u32(a) == j) { return true; } }
+  a = i32(i);
+  for (var s = 0u; s < P.ignoreK; s = s + 1u) { a = prv[a]; if (a < 0) { break; } if (u32(a) == j) { return true; } }
+  return false;
+}
+
+@compute @workgroup_size(64) fn clearGrid(@builtin(global_invocation_id) g: vec3<u32>) {
+  let i = g.x; if (i >= arrayLength(&cellCount)) { return; }
+  atomicStore(&cellCount[i], 0u);
+}
+@compute @workgroup_size(64) fn buildGrid(@builtin(global_invocation_id) g: vec3<u32>) {
+  let i = g.x; if (i >= P.n) { return; }
+  let c = cellOf(pv(i));
+  let slot = atomicAdd(&cellCount[c], 1u);
+  if (slot < P.cellCap) { cellItems[c * P.cellCap + slot] = i; }
+}
+@compute @workgroup_size(64) fn computeForces(@builtin(global_invocation_id) g: vec3<u32>) {
+  let i = g.x; let n = P.n; if (i >= n) { return; }
+  let pi = pv(i);
+  var f = vec3<f32>(0.0);
+  // Springs along this ball's two bonds (each edge handled symmetrically per particle).
+  let pr = prv[i]; if (pr >= 0) { f += springForce(pv(u32(pr)) - pi); }
+  let nx = nxt[i]; if (nx >= 0) { f += springForce(pv(u32(nx)) - pi); }
+  // Neighbor scan over the 3×3×3 cells around i.
+  let cx = axis(pi.x); let cy = axis(pi.y); let cz = axis(pi.z);
+  let gd = i32(P.gridDim);
+  let md2 = P.minDist * P.minDist;
+  let ai = attr[i]; let kindI = ai & 3u; let typeI = (ai >> 2u) & 3u; let monI = ai >> 4u;
+  for (var oz = -1; oz <= 1; oz++) {
+    let zz = clamp(cz + oz, 0, gd - 1);
+    for (var oy = -1; oy <= 1; oy++) {
+      let yy = clamp(cy + oy, 0, gd - 1);
+      for (var ox = -1; ox <= 1; ox++) {
+        let xx = clamp(cx + ox, 0, gd - 1);
+        let cid = (u32(zz)*P.gridDim + u32(yy))*P.gridDim + u32(xx);
+        let cnt = min(atomicLoad(&cellCount[cid]), P.cellCap);
+        for (var s = 0u; s < cnt; s = s + 1u) {
+          let j = cellItems[cid * P.cellCap + s];
+          if (j == i) { continue; }
+          let diff = pv(j) - pi;                 // from i to j
+          let d2 = dot(diff, diff);
+          if (d2 < 1e-12) { continue; }
+          let withinChem = (P.chem != 0.0) && (d2 < P.chemRange2);
+          let withinCol = d2 < md2;
+          if (!withinChem && !withinCol) { continue; }
+          let dist = sqrt(d2);
+          // Body affinity: BODY balls of different monomers; like attract / unlike repel (×chem sign).
+          if (withinChem) {
+            let aj = attr[j];
+            if (kindI == 1u && (aj & 3u) == 1u && monI != (aj >> 4u)) {
+              let like = typeI == ((aj >> 2u) & 3u);
+              let s = P.chem * select(-1.0, 1.0, like) * (P.chemRange - dist) / (P.chemRange * dist);
+              f += s * diff;                     // toward j (s>0) / away (s<0)
+            }
+          }
+          // Collision: push i away from j, skipping its K nearest bonded neighbors.
+          if (withinCol && !withinK(i, j)) {
+            f += (P.kCol * (P.minDist - dist) / dist) * (-diff);
+          }
+        }
+      }
+    }
+  }
+  if (P.jiggle > 0.0) {
+    let r = vec3<f32>(hash1(3u*i + P.frameSeed),
+                      hash1(3u*i + 1u + P.frameSeed*7u),
+                      hash1(3u*i + 2u + P.frameSeed*13u)) * 2.0 - 1.0;
+    f += r * P.jiggle;
+  }
+  if (P.containK > 0.0) {
+    let d = length(pi);
+    if (d > P.containR) { f += (-P.containK * (d - P.containR) / d) * pi; }
+  }
+  force[3u*i] = f.x; force[3u*i+1u] = f.y; force[3u*i+2u] = f.z;
+}
+@compute @workgroup_size(64) fn integrate(@builtin(global_invocation_id) g: vec3<u32>) {
+  let i = g.x; if (i >= P.n) { return; }
+  let b = 3u*i;
+  if (P.pinFlag == 1u && i == P.pinIdx) {        // dragged ball: held at the value the CPU wrote
+    vel[b]=0.0; vel[b+1u]=0.0; vel[b+2u]=0.0; return;
+  }
+  var v = vec3<f32>(vel[b], vel[b+1u], vel[b+2u]);
+  let fo = vec3<f32>(force[b], force[b+1u], force[b+2u]);
+  var p = vec3<f32>(pos[b], pos[b+1u], pos[b+2u]);
+  v = (v + fo * P.dt) * P.damp;
+  p += v * P.dt;
+  pos[b]=p.x; pos[b+1u]=p.y; pos[b+2u]=p.z;
+  vel[b]=v.x; vel[b+1u]=v.y; vel[b+2u]=v.z;
+}`;
+
+async function createGPUEngine() {
+  if (!('gpu' in navigator)) return null;
+  try {
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) return null;
+    const device = await adapter.requestDevice();
+    device.addEventListener && device.addEventListener('uncapturederror',
+      ev => console.error('WebGPU error:', ev.error && ev.error.message));
+
+    const numCells = GRID_CAP * GRID_CAP * GRID_CAP;
+    const fbytes = MAX_BALLS * 3 * 4;
+    const U = GPUBufferUsage;
+    const mk = (size, usage) => device.createBuffer({ size, usage });
+    const paramsBuf    = mk(96, U.UNIFORM | U.COPY_DST);
+    const posBuf       = mk(fbytes, U.STORAGE | U.COPY_SRC | U.COPY_DST);
+    const velBuf       = mk(fbytes, U.STORAGE | U.COPY_DST);
+    const forceBuf     = mk(fbytes, U.STORAGE);
+    const cellCountBuf = mk(numCells * 4, U.STORAGE);
+    const cellItemsBuf = mk(numCells * CELL_CAP * 4, U.STORAGE);
+    const nxtBuf       = mk(MAX_BALLS * 4, U.STORAGE | U.COPY_DST);
+    const prvBuf       = mk(MAX_BALLS * 4, U.STORAGE | U.COPY_DST);
+    const attrBuf      = mk(MAX_BALLS * 4, U.STORAGE | U.COPY_DST);
+    const posStaging   = mk(fbytes, U.MAP_READ | U.COPY_DST);
+
+    const module = device.createShaderModule({ code: PHYS_WGSL });
+    if (module.getCompilationInfo) {
+      const info = await module.getCompilationInfo();
+      for (const m of info.messages) if (m.type === 'error') console.error('WGSL', m.lineNum + ':' + m.linePos, m.message);
+    }
+    const bgl = device.createBindGroupLayout({ entries: [0,1,2,3,4,5,6,7,8].map(binding => ({
+      binding, visibility: GPUShaderStage.COMPUTE,
+      buffer: { type: binding === 0 ? 'uniform' : (binding >= 6 ? 'read-only-storage' : 'storage') },
+    })) });
+    const pl = device.createPipelineLayout({ bindGroupLayouts: [bgl] });
+    const pipe = ep => device.createComputePipeline({ layout: pl, compute: { module, entryPoint: ep } });
+    const pipes = { clear: pipe('clearGrid'), build: pipe('buildGrid'), forces: pipe('computeForces'), integrate: pipe('integrate') };
+    const bind = device.createBindGroup({ layout: bgl,
+      entries: [paramsBuf, posBuf, velBuf, forceBuf, cellCountBuf, cellItemsBuf, nxtBuf, prvBuf, attrBuf]
+        .map((buffer, binding) => ({ binding, resource: { buffer } })) });
+
+    const pbuf = new ArrayBuffer(96);
+    const pu = new Uint32Array(pbuf), pf = new Float32Array(pbuf);
+    let frame = 0;
+    const wg = x => Math.max(1, Math.ceil(x / 64));
+
+    function writeParams(n, seed) {
+      const r = cfg.interact;
+      const minDist = 2 * r;
+      const chem = cfg.chem;
+      const chemRange = CHEM_RANGE * r;
+      let cellSize = chem !== 0 ? Math.max(minDist, chemRange) : minDist;
+      let gridDim = Math.ceil(WORLD_SIZE / cellSize);
+      if (gridDim > GRID_CAP) { gridDim = GRID_CAP; cellSize = WORLD_SIZE / gridDim; }
+      pu[0] = n; pu[1] = gridDim; pu[2] = cfg.ignoreK; pu[3] = seed >>> 0;
+      pf[4] = 0.18; pf[5] = cfg.spring; pf[6] = cfg.collide; pf[7] = r;
+      pf[8] = minDist; pf[9] = cfg.jiggle; pf[10] = cfg.damp; pf[11] = chem;
+      pf[12] = chemRange; pf[13] = chemRange * chemRange; pf[14] = cfg.bondLen * r; pf[15] = cellSize;
+      pf[16] = WORLD_MIN; pu[17] = CELL_CAP; pf[18] = cfg.containR; pf[19] = cfg.containK;
+      const pinned = dragBall >= 0 && dragBall < n;
+      pu[20] = pinned ? dragBall : 0; pu[21] = pinned ? 1 : 0;
+      device.queue.writeBuffer(paramsBuf, 0, pbuf);
+    }
+    function stepGPU(n, substeps) {
+      for (let s = 0; s < substeps; s++) {
+        writeParams(n, frame * 31 + s);
+        const enc = device.createCommandEncoder();
+        const dispatch = (pipeline, count) => {
+          const p = enc.beginComputePass();
+          p.setPipeline(pipeline); p.setBindGroup(0, bind);
+          p.dispatchWorkgroups(wg(count)); p.end();
+        };
+        dispatch(pipes.clear, numCells);   // separate passes order the writes
+        dispatch(pipes.build, n);
+        dispatch(pipes.forces, n);
+        dispatch(pipes.integrate, n);
+        device.queue.submit([enc.finish()]);
+      }
+      frame++;
+    }
+    async function readPositions(n) {
+      const len = n * 3 * 4;
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(posBuf, 0, posStaging, 0, len);
+      device.queue.submit([enc.finish()]);
+      await posStaging.mapAsync(GPUMapMode.READ, 0, len);
+      pos.set(new Float32Array(posStaging.getMappedRange(0, len)));
+      posStaging.unmap();
+    }
+    return {
+      device, step: stepGPU, readPositions,
+      uploadAll(n) {
+        device.queue.writeBuffer(posBuf, 0, pos, 0, n * 3);
+        device.queue.writeBuffer(velBuf, 0, vel, 0, n * 3);
+        device.queue.writeBuffer(nxtBuf, 0, next, 0, n);
+        device.queue.writeBuffer(prvBuf, 0, prev, 0, n);
+        device.queue.writeBuffer(attrBuf, 0, attr, 0, n);
+      },
+      uploadBonds(n) {
+        device.queue.writeBuffer(nxtBuf, 0, next, 0, n);
+        device.queue.writeBuffer(prvBuf, 0, prev, 0, n);
+      },
+      uploadPositions(n) { device.queue.writeBuffer(posBuf, 0, pos, 0, n * 3); },
+      pinUpload(i) {
+        device.queue.writeBuffer(posBuf, i * 3 * 4, pos, i * 3, 3);
+        device.queue.writeBuffer(velBuf, i * 3 * 4, vel, i * 3, 3);
+      },
+    };
+  } catch (e) {
+    console.warn('WebGPU unavailable, using CPU physics:', e);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
 let lastT = performance.now();
 let fpsAccum = 0, fpsFrames = 0;
 const fpsEl = document.getElementById('fps');
 
-function animate() {
+async function animate() {
   const now = performance.now();
   const frameDt = Math.min((now - lastT) / 1000, 0.05);
   lastT = now;
 
   if (!cfg.paused && ballCount) {
-    const dt = 0.18;                     // fixed sim dt for stability
-    for (let s = 0; s < cfg.substeps; s++) step(dt);
-    recenter();
-    tryBind();                           // polymerization happens once per frame
+    if (gpu) {
+      try {
+        if (gpuBondsDirty) { gpu.uploadBonds(ballCount); gpuBondsDirty = false; }   // bind/cut edits → GPU
+        if (dragBall >= 0 && dragBall < ballCount) {                                // hold the dragged ball
+          const o = dragBall * 3;
+          pos[o] = dragWorld.x; pos[o + 1] = dragWorld.y; pos[o + 2] = dragWorld.z;
+          vel[o] = vel[o + 1] = vel[o + 2] = 0;
+          gpu.pinUpload(dragBall);
+        }
+        gpu.step(ballCount, cfg.substeps);
+        await gpu.readPositions(ballCount);   // refresh the CPU mirror for rendering + binding
+        tryBind();                            // polymerization runs on the CPU each frame
+        if (++gpuTick >= GPU_RECENTER_INTERVAL) {   // occasional recenter to bound any slow drift
+          gpuTick = 0;
+          recenter();
+          gpu.uploadPositions(ballCount);
+        }
+      } catch (e) {
+        console.error('GPU physics failed, falling back to CPU:', e);
+        gpu = null;
+        document.getElementById('mode').textContent = 'CPU (gpu error)';
+      }
+    } else {
+      const dt = 0.18;                     // fixed sim dt for stability
+      for (let s = 0; s < cfg.substeps; s++) step(dt);
+      recenter();
+      tryBind();                           // polymerization happens once per frame
+    }
   }
 
   syncInstances();
@@ -933,10 +1226,19 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-updateContainSphere();
-spawnSoup();
-lastT = performance.now();
-requestAnimationFrame(animate);
+(async () => {
+  updateContainSphere();
+  gpu = await createGPUEngine();        // null if WebGPU is unavailable / fails
+  const modeEl = document.getElementById('mode');
+  if (modeEl) modeEl.textContent = gpu ? 'GPU' : 'CPU';
+  if (gpu) {                            // the GPU can push far more balls than the CPU fallback
+    const ms = document.getElementById('monomers');
+    if (ms) ms.max = 6000;
+  }
+  spawnSoup();                          // fills CPU arrays; uploads to the GPU if present
+  lastT = performance.now();
+  requestAnimationFrame(animate);
+})();
 
 // Debug handle for automated testing (harmless in production).
 window.__dbg = {
@@ -949,6 +1251,7 @@ window.__dbg = {
   get next() { return next; },
   get prev() { return prev; },
   cut(i) { return cutAt(i); },
+  get gpu() { return !!gpu; },
   molecules() { let m = 0; for (let i = 0; i < ballCount; i++) if (kind[i] === HEAD && prev[i] < 0) m++; return m; },
   bonds() { let b = 0; for (let i = 0; i < ballCount; i++) if (kind[i] === TAIL && next[i] >= 0) b++; return b; },
   pinBall(i, x, y, z) { dragBall = i; dragWorld.set(x, y, z); },
