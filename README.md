@@ -23,10 +23,11 @@ longer chains. It's a fork of the ball-and-spring look & feel from
     default (only directly-bonded balls are exempt), which keeps chains extended
     instead of collapsing.
   - **Jiggle** is a thermal kick on every ball — this is what keeps the soup mixing
-    so reactive ends keep finding each other. Turn it to 0 to freeze the dance.
+    so reactive ends keep finding each other. It's **off by default** (turn it up to
+    stir the soup, e.g. so spontaneous binding has something to work with).
   - **Soft boundary** instead of gravity: a ball that wanders past radius `R`
-    (default 20) feels a very slight spring back toward the center. Everything just
-    floats — there is no floor and no "down".
+    (default 40, up to 80) feels a very slight spring back toward the center.
+    Everything just floats — there is no floor and no "down".
 - **Polymerization.** Once per frame, every **unbound head** touching an **unbound
   tail** binds with a small, **tunable probability** (the "Bind probability / frame"
   slider). Binding joins a tail's outgoing bond to a head (`head ← tail`), extending
@@ -41,6 +42,22 @@ longer chains. It's a fork of the ball-and-spring look & feel from
   within a single monomer (same-chain is fine) — so you can coax the soup into
   clusters and structure. This and the bind probability both live under the
   **Chemistry** panel.
+- **Enzymes.** The Chemistry panel can also seed two kinds of purposeful agents,
+  drawn as larger balls in their own colors, that **interact like a bigger ball**.
+  Each feels a *seek force* toward its current goal but also collides mutually with the
+  soup, so balls push it off course just as it pushes them — it **gives way and flows
+  around clusters** instead of plowing straight through. You set how many of each, plus
+  a shared swim speed, size, and "near bias" (how strongly an enzyme prefers a close
+  target over a far one). Each acts deliberately:
+  - **Monomerase** (amber) — a polymer-cutter. It hunts a *bound* tail (biased toward
+    nearby ones), swims to it, and severs that tail's inter-monomer bond. If the cut
+    monomer's head is itself bound, it retargets the tail feeding that head and keeps
+    chewing *upstream*, so it walks a chain apart monomer by monomer; otherwise it goes
+    back to searching. A roomful of them digests polymers back into free monomers.
+  - **Polymerase** (aqua) — an end-joiner. It grabs a free tail (near bias), carries it
+    to a free head on a *different* molecule (near bias), and binds the two
+    (`head ← tail` — the only bond the model allows), then looks for another pair. A
+    roomful of them assembles the soup into long chains on its own.
 
 The **molecules** counter (number of open chains) ticks down and the **bonds**
 counter ticks up as the soup assembles.
@@ -52,6 +69,9 @@ counter ticks up as the soup assembles.
 | **Monomers (N)** | How many monomers a fresh soup contains (respawns). |
 | **Bind probability / frame** | Chance a touching unbound head+tail pair binds, per frame. 0 = no polymerization. *(Chemistry panel.)* |
 | **Body affinity (like ↔ unlike)** | Short-range force between bodies of different monomers: + = like-attract/unlike-repel, − = reversed, 0 = off. *(Chemistry panel.)* |
+| **Monomerase enzymes** | How many polymer-cutting enzymes to add. They find a bound tail, cut it, and chew upstream — digesting chains into monomers. *(Chemistry panel.)* |
+| **Polymerase enzymes** | How many end-joining enzymes to add. They carry a free tail to a free head and bind them — building chains. *(Chemistry panel.)* |
+| **Enzyme swim speed / size / near bias** | How fast enzymes move toward a target, how big each enzyme is (× ball radius, render + collision), and how strongly they prefer a nearby target over a far one (0 = uniform). *(Chemistry panel.)* |
 | **Fresh soup** | Scatter a new random soup. |
 | **Render radius** | Drawn ball size only — cosmetic, no effect on the sim. |
 | **Interact radius** | Drives the sim: collision distance is `2 · interact`. |
@@ -119,6 +139,19 @@ for large soups — the physics then runs on the GPU (see implementation notes).
   (30000 balls) when the GPU is active. If WebGPU is missing or fails, it falls back
   to the CPU physics with the same behavior. The stats line shows **GPU** or **CPU**
   so you can tell which path is running.
+- **Enzymes.** Enzymes live *outside* the monomer ball arrays — their own positions
+  and a second `InstancedMesh` — so the GPU/CPU physics core never changes. A small
+  CPU state machine runs each frame against the freshly read-back position mirror:
+  it picks targets (a near-biased weighted-random pick over eligible ends), then moves
+  as a small damped body — a seek force toward the goal (it aims at the closest point one
+  enzyme-radius out from the target ball, so it docks *alongside* it rather than burying
+  in) plus mutual repulsion from any ball it overlaps (each yields half the overlap, so
+  the soup deflects it). It edits
+  only what it touches — the bond pointers (cut/bind, the same edits as manual
+  cutting/polymerization) and the handful of balls it carries or jostles. On the GPU
+  path those touched balls are re-uploaded individually (the set is tiny), so enzymes
+  add no per-ball GPU work. The target's and carried strand's own monomer are exempt
+  from the collision, so docking and carrying never fight the enzyme's own motion.
 - **WebXR / VR.** All visuals live in a `simGroup` that the desktop leaves at identity
   and VR shrinks/places in front of the viewer. The loop runs on
   `renderer.setAnimationLoop`, and **rendering is decoupled from physics**: every XR

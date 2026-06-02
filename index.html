@@ -149,7 +149,9 @@
     <div class="lrow"><span class="sw" id="sw-b1"></span> Body · monomer type B</div>
     <div class="lrow"><span class="sw" id="sw-b2"></span> Body · monomer type C</div>
     <div class="lrow"><span class="sw" id="sw-b3"></span> Body · monomer type D</div>
-    <div class="lrow" style="opacity:.7">Free (unbound) ends glow brighter &amp; bulge.</div>
+    <div class="lrow"><span class="sw" id="sw-enz0"></span> Monomerase — cuts a polymer apart</div>
+    <div class="lrow"><span class="sw" id="sw-enz1"></span> Polymerase — joins free ends</div>
+    <div class="lrow" style="opacity:.7">Free (unbound) ends glow brighter &amp; bulge. Enzymes are the big balls.</div>
   </div>
 
   <details open>
@@ -165,6 +167,34 @@
       <input type="range" id="chem" min="-0.4" max="0.4" step="0.01" value="0" />
     </div>
     <p class="sub" style="margin:6px 0 2px; opacity:.7">+ like bodies attract &amp; unlike repel when very close · − reversed · acts only between different monomers.</p>
+
+    <div class="field" style="margin-top:12px; border-top:1px solid var(--panel-border); padding-top:10px">
+      <div class="row"><label for="monomerase">Monomerase enzymes</label><span class="val" id="monomeraseVal">0</span></div>
+      <input type="range" id="monomerase" min="0" max="40" step="1" value="0" />
+    </div>
+    <p class="sub" style="margin:4px 0 2px; opacity:.7">Hunts a bound tail, cuts it, then chews upstream toward the head — digesting a polymer into monomers.</p>
+
+    <div class="field">
+      <div class="row"><label for="polymerase">Polymerase enzymes</label><span class="val" id="polymeraseVal">0</span></div>
+      <input type="range" id="polymerase" min="0" max="40" step="1" value="0" />
+    </div>
+    <p class="sub" style="margin:4px 0 2px; opacity:.7">Grabs a free tail, carries it to a free head, and joins them — polymerization on legs.</p>
+
+    <div class="field">
+      <div class="row"><label for="enzSpeed">Enzyme swim speed</label><span class="val" id="enzSpeedVal">0.40</span></div>
+      <input type="range" id="enzSpeed" min="0.05" max="2.0" step="0.05" value="0.4" />
+    </div>
+
+    <div class="field">
+      <div class="row"><label for="enzSize">Enzyme size (× ball)</label><span class="val" id="enzSizeVal">1.5</span></div>
+      <input type="range" id="enzSize" min="0.5" max="4.0" step="0.1" value="1.5" />
+    </div>
+
+    <div class="field">
+      <div class="row"><label for="enzBias">Enzyme near bias</label><span class="val" id="enzBiasVal">0.20</span></div>
+      <input type="range" id="enzBias" min="0" max="1" step="0.02" value="0.2" />
+    </div>
+    <p class="sub" style="margin:4px 0 2px; opacity:.7">How strongly an enzyme prefers a nearby target over a far one (0 = pick purely at random).</p>
   </details>
 
   <details>
@@ -196,8 +226,8 @@
     </div>
 
     <div class="field">
-      <div class="row"><label for="containR">Boundary radius</label><span class="val" id="containRVal">20</span></div>
-      <input type="range" id="containR" min="5" max="40" step="0.5" value="20" />
+      <div class="row"><label for="containR">Boundary radius</label><span class="val" id="containRVal">40</span></div>
+      <input type="range" id="containR" min="5" max="80" step="0.5" value="40" />
     </div>
 
     <div class="field">
@@ -223,8 +253,8 @@
       <input type="range" id="damp" min="0.5" max="0.99" step="0.01" value="0.9" />
     </div>
     <div class="field">
-      <div class="row"><label for="jiggle">Jiggle (thermal)</label><span class="val" id="jiggleVal">0.60</span></div>
-      <input type="range" id="jiggle" min="0" max="3" step="0.05" value="0.6" />
+      <div class="row"><label for="jiggle">Jiggle (thermal)</label><span class="val" id="jiggleVal">0.00</span></div>
+      <input type="range" id="jiggle" min="0" max="3" step="0.05" value="0" />
     </div>
     <div class="field">
       <div class="row"><label for="speed">Sim substeps / frame</label><span class="val" id="speedVal">4</span></div>
@@ -328,11 +358,18 @@ const BODY_COLORS = [0x66bb6a, 0xffca28, 0xab47bc, 0xec407a].map(h => new THREE.
 const WHITE = new THREE.Color(0xffffff);
 const END_BULGE = 1.18;                         // free ends are drawn a touch larger
 
+// Enzymes — purposeful "bigger ball" agents (see the enzyme section below). Two
+// kinds, each its own clearly-distinct color, drawn larger than the monomer balls.
+const ENZ_MONOMERASE = 0, ENZ_POLYMERASE = 1;
+const ENZYME_COLORS = [new THREE.Color(0xff6d00), new THREE.Color(0x18ffd5)]; // amber · aqua
+// Enzyme radius (as a multiple of the ball radius) is tunable — see cfg.enzSize.
+
 // Paint the legend swatches.
 const css = c => '#' + c.getHexString();
 document.getElementById('sw-head').style.background = css(HEAD_COLOR);
 document.getElementById('sw-tail').style.background = css(TAIL_COLOR);
 BODY_COLORS.forEach((c, i) => { document.getElementById('sw-b' + i).style.background = css(c); });
+ENZYME_COLORS.forEach((c, i) => { const el = document.getElementById('sw-enz' + i); if (el) el.style.background = css(c); });
 
 // ---------------------------------------------------------------------------
 // Simulation state
@@ -344,16 +381,21 @@ const cfg = {
   monomers: 40,
   bindProb: 0.02,       // per frame, per touching unbound (head, tail) pair
   chem: 0,              // body affinity: + like-attract/unlike-repel, − reversed, 0 = off
+  monomerase: 0,        // number of monomerase enzymes (polymer-cutters)
+  polymerase: 0,        // number of random-polymerase enzymes (end-joiners)
+  enzSpeed: 0.4,        // enzyme swim speed (sim units advanced toward its target per frame)
+  enzBias: 0.2,         // enzyme "near bias": how strongly it prefers a nearby target (0 = uniform)
+  enzSize: 1.5,         // enzyme radius as a multiple of the ball radius (render + collision)
   radius: 1.0,          // render radius: ball size (cosmetic only)
   interact: 1.0,        // interaction radius: collisions push apart within 2·interact
   bondLen: 1.0,         // bonded-center rest length as a factor of interact radius
-  containR: 20,         // balls beyond this radius are gently pushed back toward the origin
+  containR: 40,         // balls beyond this radius are gently pushed back toward the origin
   containK: 0.05,       // strength of that boundary push
   ignoreK: 1,           // collision-exempt chain neighbors (1 = directly bonded only)
   spring: 0.6,
   collide: 1.0,
   damp: 0.9,
-  jiggle: 0.6,          // thermal kick that keeps the soup mixing (drives binding)
+  jiggle: 0,            // thermal kick that keeps the soup mixing (drives binding); off by default
   substeps: 4,
   paused: false,
   showBonds: false,
@@ -383,6 +425,27 @@ let ballCount = 0;
 let colorsDirty = true;
 let lastPairCount = 0;
 
+// Enzymes live OUTSIDE the monomer ball arrays — their own fixed-capacity state and
+// their own render mesh — so the GPU/CPU physics core is untouched. They are driven
+// by a CPU state machine each frame (see "Enzymes" below) and only edit the handful
+// of monomer balls they shove/carry, re-uploading just those to the GPU.
+const ENZ_CAP = 200;
+const enzPos   = new Float32Array(ENZ_CAP * 3);
+const enzVel   = new Float32Array(ENZ_CAP * 3);   // enzyme velocity (dynamic, force-driven motion)
+const enzKindA = new Uint8Array(ENZ_CAP);         // ENZ_MONOMERASE / ENZ_POLYMERASE
+const enzPhase = new Uint8Array(ENZ_CAP);         // state-machine phase (see PH_* below)
+const enzTarget = new Int32Array(ENZ_CAP);        // ball index it is swimming toward, or -1
+const enzCarry  = new Int32Array(ENZ_CAP);        // ball index it is carrying (polymerase), or -1
+let enzCount = 0;
+let enzColorsDirty = true;
+
+// Dirty set of monomer-ball indices an enzyme edited this frame (carried / shoved),
+// so the GPU path can re-upload exactly those. O(1) de-dupe via a generation stamp.
+const dirtyStamp = new Int32Array(MAX_BALLS).fill(-1);
+let dirtyGen = 0;
+const dirtyList = [];
+function markDirty(i) { if (dirtyStamp[i] !== dirtyGen) { dirtyStamp[i] = dirtyGen; dirtyList.push(i); } }
+
 // GPU physics engine (WebGPU), or null when unavailable → the CPU step() runs instead.
 let gpu = null;
 let gpuBondsDirty = false;              // next/prev changed (bind/cut) → re-upload before next GPU step
@@ -403,6 +466,18 @@ instMesh.count = 0;
 instMesh.castShadow = true;
 instMesh.receiveShadow = true;
 simGroup.add(instMesh);
+
+// Enzymes draw from a second instanced mesh (same sphere geometry, bigger per-instance
+// scale, per-instance color = enzyme kind). It rides in simGroup too, so VR scaling and
+// orbit apply identically. A slightly glossier material sets them apart from the balls.
+const enzMat = new THREE.MeshStandardMaterial({ roughness: 0.3, metalness: 0.15 });
+const enzMesh = new THREE.InstancedMesh(ballGeo, enzMat, ENZ_CAP);
+enzMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+enzMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(ENZ_CAP * 3), 3);
+enzMesh.count = 0;
+enzMesh.castShadow = true;
+enzMesh.receiveShadow = true;
+simGroup.add(enzMesh);
 
 const tmpColor = new THREE.Color();
 let bondLines = null;                  // optional bond line overlay
@@ -457,6 +532,7 @@ function spawnSoup() {
   colorsDirty = true;
   rebuildBondLines();
   refreshCounts();
+  syncEnzymes(true);                                             // keep enzyme count; drop stale targets
   if (gpu) { gpu.uploadAll(ballCount); gpuBondsDirty = false; }   // push the fresh soup to the GPU
 }
 
@@ -624,6 +700,8 @@ function recenter() {
   for (let i = 0; i < n; i++) { cx += pos[i * 3]; cy += pos[i * 3 + 1]; cz += pos[i * 3 + 2]; }
   cx /= n; cy /= n; cz /= n;
   for (let i = 0; i < n; i++) { pos[i * 3] -= cx; pos[i * 3 + 1] -= cy; pos[i * 3 + 2] -= cz; }
+  // Shift enzymes by the same vector so they keep their position relative to the soup.
+  for (let e = 0; e < enzCount; e++) { enzPos[e * 3] -= cx; enzPos[e * 3 + 1] -= cy; enzPos[e * 3 + 2] -= cz; }
 }
 
 // ---------------------------------------------------------------------------
@@ -706,6 +784,241 @@ function cutAt(i) {
 }
 
 // ---------------------------------------------------------------------------
+// Enzymes — purposeful "bigger ball" agents that swim around and act on the soup.
+//
+//   • Monomerase (a polymer-cutter): hunts a BOUND tail (near bias), swims to it,
+//     cuts that tail's inter-monomer bond, then — if the cut monomer's head is also
+//     bound — retargets the tail bonded into that head and chews further upstream,
+//     digesting a chain into monomers. Otherwise it goes back to searching.
+//   • Polymerase (an end-joiner): grabs a free (unbound) tail (near bias), carries
+//     it to a free head on a different molecule (near bias), then binds the two
+//     (head ← tail — the only bond the model supports). Then it looks for another.
+//
+// They run on the CPU each frame against the freshly read-back position mirror, so
+// the GPU/CPU physics core never changes. An enzyme interacts "like a bigger ball"
+// by shoving overlapping monomer balls out of its volume (and other enzymes apart).
+// ---------------------------------------------------------------------------
+const PH_SEARCH = 0, PH_GOTO = 1, PH_SEARCH2 = 2, PH_GOTO2 = 3;   // phases (read per kind)
+const enzGrid = new Map();                                        // ball broad-phase for enzyme collision
+// Enzymes move dynamically: a seek force toward the goal, mutual repulsion from balls
+// (so the soup can shove them off course), and damping. They give way instead of plowing.
+const ENZ_DAMP = 0.82;        // enzyme velocity damping per frame
+const ENZ_DEPEN = 0.5;        // de-penetration split on overlap — 0.5 = enzyme & ball each yield half
+const ENZ_REACT = 0.35;       // enzyme acceleration per unit overlap — how hard the soup pushes it
+const ENZ_BALL_KICK = 0.4;    // ball velocity nudge per unit overlap — the enzyme's soft obstacle push
+
+function resetEnzyme(e) { enzPhase[e] = PH_SEARCH; enzTarget[e] = -1; enzCarry[e] = -1; }
+function initEnzyme(e, k) {
+  enzKindA[e] = k; resetEnzyme(e);
+  const p = randomInSphere(Math.max(2, cfg.containR - 2));
+  const o = e * 3;
+  enzPos[o] = p.x; enzPos[o + 1] = p.y; enzPos[o + 2] = p.z;
+  enzVel[o] = enzVel[o + 1] = enzVel[o + 2] = 0;
+}
+// Reconcile the live enzyme list with the requested counts. New / kind-changed slots
+// are (re)spawned; surviving slots keep their position (so nudging a count slider
+// doesn't teleport the rest). `resetExisting` also drops every enzyme's stale target,
+// which a fresh soup needs because ball indices have all changed.
+function syncEnzymes(resetExisting) {
+  const nMono = cfg.monomerase | 0, nPoly = cfg.polymerase | 0;
+  const want = Math.min(nMono + nPoly, ENZ_CAP);
+  for (let e = 0; e < want; e++) {
+    const k = e < nMono ? ENZ_MONOMERASE : ENZ_POLYMERASE;
+    if (e >= enzCount || enzKindA[e] !== k) initEnzyme(e, k);
+    else if (resetExisting) resetEnzyme(e);
+  }
+  enzCount = want;
+  enzColorsDirty = true;
+}
+
+// The head ball of i's own monomer: walk intra-monomer prev links and stop at the
+// HEAD (so we never follow the head's inter-monomer bond into the previous monomer).
+function monomerHead(i) {
+  let a = i, guard = 0;
+  while (kind[a] !== HEAD) { a = prev[a]; if (a < 0 || guard++ > MONOMER_LEN) return -1; }
+  return a;
+}
+
+// Weighted-random ball pick biased toward nearer ones (A-Res reservoir sampling with
+// weight = exp(-bias·distance)). `pred(i)` selects eligible balls. bias 0 → uniform.
+function pickNearBiased(ex, ey, ez, pred) {
+  const bias = cfg.enzBias;
+  let best = -1, bestKey = -1;
+  for (let i = 0; i < ballCount; i++) {
+    if (!pred(i)) continue;
+    const dx = pos[i * 3] - ex, dy = pos[i * 3 + 1] - ey, dz = pos[i * 3 + 2] - ez;
+    const w = Math.exp(-bias * Math.sqrt(dx * dx + dy * dy + dz * dz));
+    if (w <= 0) continue;
+    const key = Math.pow(Math.random(), 1 / w);     // larger key wins ∝ weight
+    if (key > bestKey) { bestKey = key; best = i; }
+  }
+  return best;
+}
+
+// One frame of enzyme behavior. Edits the CPU position mirror in place (carry pins,
+// collision shoves) and the bond pointers (cut/bind). On the GPU path, `uploadToGPU`
+// asks it to push exactly the balls it touched back to the device.
+function updateEnzymes(uploadToGPU) {
+  if (enzCount === 0) return;
+  const r = cfg.interact;
+  const enzColR = cfg.enzSize * r;         // enzyme physical (collision) radius in sim units
+  const sum = enzColR + r, sum2 = sum * sum;
+  const reach2 = sum2;                      // act on a target ball once it's this close
+  const speed = cfg.enzSpeed;
+  const R = cfg.containR;
+  const cell = sum;
+  dirtyGen++; dirtyList.length = 0;
+
+  // Broad-phase of all balls for the bigger-ball collision (only when enzymes exist).
+  enzGrid.clear();
+  for (let i = 0; i < ballCount; i++) {
+    const key = gridKey(Math.floor(pos[i * 3] / cell), Math.floor(pos[i * 3 + 1] / cell), Math.floor(pos[i * 3 + 2] / cell));
+    let bucket = enzGrid.get(key);
+    if (!bucket) { bucket = []; enzGrid.set(key, bucket); }
+    bucket.push(i);
+  }
+
+  for (let e = 0; e < enzCount; e++) {
+    const o = e * 3;
+    let ex = enzPos[o], ey = enzPos[o + 1], ez = enzPos[o + 2];
+    let tgt = enzTarget[e];
+
+    if (enzKindA[e] === ENZ_MONOMERASE) {
+      // --- Monomerase: target a bound tail, cut it, then chew upstream. ---------
+      if (tgt >= 0 && !(tgt < ballCount && kind[tgt] === TAIL && next[tgt] >= 0)) { tgt = -1; }
+      if (tgt < 0) { tgt = pickNearBiased(ex, ey, ez, i => kind[i] === TAIL && next[i] >= 0); enzPhase[e] = tgt >= 0 ? PH_GOTO : PH_SEARCH; }
+      enzTarget[e] = tgt;
+      if (tgt >= 0) {
+        const dx = pos[tgt * 3] - ex, dy = pos[tgt * 3 + 1] - ey, dz = pos[tgt * 3 + 2] - ez;
+        if (dx * dx + dy * dy + dz * dz <= reach2) {        // docked → cut this tail's bond
+          cutAt(tgt);
+          const h = monomerHead(tgt);                       // chew upstream if the head is bound
+          enzTarget[e] = (h >= 0 && prev[h] >= 0) ? prev[h] : -1;
+          enzPhase[e] = enzTarget[e] >= 0 ? PH_GOTO : PH_SEARCH;
+        }
+      }
+    } else {
+      // --- Polymerase: grab a free tail, carry it to a free head, bind them. ----
+      let carry = enzCarry[e];
+      if (carry >= 0 && !(carry < ballCount && kind[carry] === TAIL && next[carry] < 0)) { carry = -1; enzCarry[e] = -1; tgt = -1; }
+      if (carry < 0) {                                       // phase 1: find & reach a free tail
+        if (!(tgt >= 0 && tgt < ballCount && kind[tgt] === TAIL && next[tgt] < 0)) { tgt = pickNearBiased(ex, ey, ez, i => kind[i] === TAIL && next[i] < 0); enzPhase[e] = tgt >= 0 ? PH_GOTO : PH_SEARCH; }
+        if (tgt >= 0) {
+          const dx = pos[tgt * 3] - ex, dy = pos[tgt * 3 + 1] - ey, dz = pos[tgt * 3 + 2] - ez;
+          if (dx * dx + dy * dy + dz * dz <= reach2) { carry = tgt; enzCarry[e] = tgt; tgt = -1; enzPhase[e] = PH_SEARCH2; }
+        }
+      }
+      if (carry >= 0) {                                      // phase 2: carry it to a free head
+        const ch = chainHead(carry);
+        if (!(tgt >= 0 && tgt < ballCount && kind[tgt] === HEAD && prev[tgt] < 0 && chainHead(tgt) !== ch)) {
+          tgt = pickNearBiased(ex, ey, ez, i => kind[i] === HEAD && prev[i] < 0 && chainHead(i) !== ch);
+          enzPhase[e] = tgt >= 0 ? PH_GOTO2 : PH_SEARCH2;
+        }
+        if (tgt >= 0) {
+          const dx = pos[tgt * 3] - ex, dy = pos[tgt * 3 + 1] - ey, dz = pos[tgt * 3 + 2] - ez;
+          if (dx * dx + dy * dy + dz * dz <= reach2) {       // delivered → bind tail → head
+            if (kind[carry] === TAIL && next[carry] < 0 && kind[tgt] === HEAD && prev[tgt] < 0 && chainHead(carry) !== chainHead(tgt)) {
+              next[carry] = tgt; prev[tgt] = carry;
+              colorsDirty = true; gpuBondsDirty = true; refreshCounts();
+            }
+            enzCarry[e] = -1; carry = -1; tgt = -1; enzPhase[e] = PH_SEARCH;
+          }
+        }
+      }
+      enzTarget[e] = tgt;
+    }
+
+    // --- Dynamic motion. The enzyme feels a seek FORCE toward its target and mutual
+    // repulsion from any ball it overlaps, so the soup can shove it off course — it
+    // gives way and flows around clusters instead of teleporting straight through.
+    tgt = enzTarget[e];
+    const carry = enzCarry[e];
+    let vx = enzVel[o], vy = enzVel[o + 1], vz = enzVel[o + 2];
+    let ax = 0, ay = 0, az = 0;
+
+    // Seek: a steady pull toward the target (no target → a gentle random wander).
+    // It aims not at the ball's center but at the closest point one enzyme-radius out
+    // from it, so the enzyme docks alongside its target rather than burying into it.
+    // The seek vector to that point is (ball−enz)·(1 − enzColR/bd): it pulls the enzyme
+    // in toward distance enzColR and pushes it back out if it drifts closer than that.
+    if (tgt >= 0 && tgt < ballCount) {
+      const bx = pos[tgt * 3] - ex, by = pos[tgt * 3 + 1] - ey, bz = pos[tgt * 3 + 2] - ez;
+      const bd = Math.sqrt(bx * bx + by * by + bz * bz);
+      if (bd > 1e-6) {
+        const f = 1 - enzColR / bd;                            // >0 approach · <0 back off
+        const gx = bx * f, gy = by * f, gz = bz * f;
+        const gl = Math.sqrt(gx * gx + gy * gy + gz * gz);     // = |bd − enzColR|
+        if (gl > 1e-6) { const s = speed / gl; ax += gx * s; ay += gy * s; az += gz * s; }
+      }
+    } else {
+      ax += (Math.random() * 2 - 1) * speed * 0.4;
+      ay += (Math.random() * 2 - 1) * speed * 0.4;
+      az += (Math.random() * 2 - 1) * speed * 0.4;
+    }
+
+    // Bigger-ball collision (mutual). The current target's and carried ball's own
+    // monomers are exempt, so docking and the carried strand never fight the enzyme.
+    const exMon = (tgt >= 0 && tgt < ballCount) ? monomerId[tgt] : -1;
+    const caMon = (carry >= 0 && carry < ballCount) ? monomerId[carry] : -1;
+    const cx = Math.floor(ex / cell), cy = Math.floor(ey / cell), cz = Math.floor(ez / cell);
+    for (let gx = -1; gx <= 1; gx++) for (let gy = -1; gy <= 1; gy++) for (let gz = -1; gz <= 1; gz++) {
+      const bucket = enzGrid.get(gridKey(cx + gx, cy + gy, cz + gz));
+      if (!bucket) continue;
+      for (let b = 0; b < bucket.length; b++) {
+        const i = bucket[b];
+        if (monomerId[i] === exMon || monomerId[i] === caMon) continue;
+        const dx = pos[i * 3] - ex, dy = pos[i * 3 + 1] - ey, dz = pos[i * 3 + 2] - ez;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 >= sum2 || d2 < 1e-9) continue;
+        const d = Math.sqrt(d2), inv = 1 / d, overlap = sum - d;
+        const ux = dx * inv, uy = dy * inv, uz = dz * inv;       // unit enzyme → ball
+        // Soft de-penetration split between the two (the enzyme yields, not just the ball).
+        const corr = overlap * ENZ_DEPEN;
+        pos[i * 3] += ux * corr; pos[i * 3 + 1] += uy * corr; pos[i * 3 + 2] += uz * corr;
+        ex -= ux * corr; ey -= uy * corr; ez -= uz * corr;
+        // Velocity coupling: a soft shove on the ball, an opposite kick that deflects the enzyme.
+        vel[i * 3] += ux * overlap * ENZ_BALL_KICK; vel[i * 3 + 1] += uy * overlap * ENZ_BALL_KICK; vel[i * 3 + 2] += uz * overlap * ENZ_BALL_KICK;
+        ax -= ux * overlap * ENZ_REACT; ay -= uy * overlap * ENZ_REACT; az -= uz * overlap * ENZ_REACT;
+        markDirty(i);
+      }
+    }
+
+    // Integrate as a damped body; cap the cruise speed at enzSpeed.
+    vx = (vx + ax) * ENZ_DAMP; vy = (vy + ay) * ENZ_DAMP; vz = (vz + az) * ENZ_DAMP;
+    const sp = Math.sqrt(vx * vx + vy * vy + vz * vz);
+    if (sp > speed && sp > 1e-9) { const s = speed / sp; vx *= s; vy *= s; vz *= s; }
+    ex += vx; ey += vy; ez += vz;
+
+    const dc = Math.sqrt(ex * ex + ey * ey + ez * ez);          // keep enzymes inside the boundary
+    if (dc > R) { const s = R / dc; ex *= s; ey *= s; ez *= s; vx *= 0.5; vy *= 0.5; vz *= 0.5; }
+    enzPos[o] = ex; enzPos[o + 1] = ey; enzPos[o + 2] = ez;
+    enzVel[o] = vx; enzVel[o + 1] = vy; enzVel[o + 2] = vz;
+
+    // --- Carry: pin the grabbed tail under the enzyme (its monomer trails on springs).
+    if (carry >= 0 && carry < ballCount) {
+      pos[carry * 3] = ex; pos[carry * 3 + 1] = ey; pos[carry * 3 + 2] = ez;
+      vel[carry * 3] = vel[carry * 3 + 1] = vel[carry * 3 + 2] = 0;
+      markDirty(carry);
+    }
+  }
+
+  // --- Enzyme ↔ enzyme separation (cheap O(nEnz²); keeps the big balls from stacking).
+  const sumE = 2 * enzColR, sumE2 = sumE * sumE;
+  for (let a = 0; a < enzCount; a++) for (let b = a + 1; b < enzCount; b++) {
+    const oa = a * 3, ob = b * 3;
+    const dx = enzPos[ob] - enzPos[oa], dy = enzPos[ob + 1] - enzPos[oa + 1], dz = enzPos[ob + 2] - enzPos[oa + 2];
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 >= sumE2 || d2 < 1e-9) continue;
+    const d = Math.sqrt(d2), push = 0.5 * (sumE - d) / d;
+    enzPos[oa] -= dx * push; enzPos[oa + 1] -= dy * push; enzPos[oa + 2] -= dz * push;
+    enzPos[ob] += dx * push; enzPos[ob + 1] += dy * push; enzPos[ob + 2] += dz * push;
+  }
+
+  // --- Push the touched balls back to the GPU (CPU path already edited its arrays).
+  if (uploadToGPU && gpu) for (let d = 0; d < dirtyList.length; d++) gpu.pinUpload(dirtyList[d]);
+}
+
+// ---------------------------------------------------------------------------
 // Rendering sync
 // ---------------------------------------------------------------------------
 function syncInstances() {
@@ -736,6 +1049,28 @@ function syncInstances() {
     }
     if (instMesh.instanceColor) instMesh.instanceColor.needsUpdate = true;
     colorsDirty = false;
+  }
+}
+
+// Mirror the enzyme state into the second instanced mesh: bigger per-instance scale,
+// per-instance color by kind (only re-written when the roster changes).
+function syncEnzymeInstances() {
+  enzMesh.count = enzCount;
+  if (!enzCount) return;
+  const er = cfg.enzSize * cfg.radius;
+  const m = enzMesh.instanceMatrix.array;
+  for (let e = 0; e < enzCount; e++) {
+    const o = e * 16, b = e * 3;
+    m[o] = er;    m[o+1] = 0;   m[o+2] = 0;    m[o+3] = 0;
+    m[o+4] = 0;   m[o+5] = er;  m[o+6] = 0;    m[o+7] = 0;
+    m[o+8] = 0;   m[o+9] = 0;   m[o+10] = er;  m[o+11] = 0;
+    m[o+12] = enzPos[b]; m[o+13] = enzPos[b+1]; m[o+14] = enzPos[b+2]; m[o+15] = 1;
+  }
+  enzMesh.instanceMatrix.needsUpdate = true;
+  if (enzColorsDirty) {
+    for (let e = 0; e < enzCount; e++) enzMesh.setColorAt(e, ENZYME_COLORS[enzKindA[e]]);
+    if (enzMesh.instanceColor) enzMesh.instanceColor.needsUpdate = true;
+    enzColorsDirty = false;
   }
 }
 
@@ -790,7 +1125,7 @@ function refreshCounts() {
 // ---------------------------------------------------------------------------
 const GRID_CAP = 64;                  // uniform-grid resolution cap per axis (64³ cells)
 const CELL_CAP = 64;                  // max balls tracked per cell (overflow checks dropped)
-const WORLD_MIN = -60, WORLD_SIZE = 120;   // simulation box [-60, 60] per axis (boundary R ≤ 40)
+const WORLD_MIN = -80, WORLD_SIZE = 160;   // simulation box [-80, 80] per axis (boundary R ≤ 80)
 const GPU_RECENTER_INTERVAL = 30;     // frames between GPU-mode recenters (bounds slow drift)
 
 const PHYS_WGSL = /* wgsl */`
@@ -1060,16 +1395,22 @@ async function runPhysics() {
       gpu.step(ballCount, cfg.substeps);
       await gpu.readPositions(ballCount);   // refresh the CPU mirror for rendering + binding
       tryBind();                            // polymerization runs on the CPU each frame
+      let didRecenter = false;
       if (++gpuTick >= GPU_RECENTER_INTERVAL) {   // occasional recenter to bound any slow drift
         gpuTick = 0;
         recenter();
-        gpu.uploadPositions(ballCount);
+        didRecenter = true;
       }
+      // Enzymes edit the mirror after readback; on a recenter frame the full re-upload
+      // below carries their edits too, otherwise they re-upload just the balls they touched.
+      updateEnzymes(!didRecenter);
+      if (didRecenter) gpu.uploadPositions(ballCount);
     } else {
       const dt = 0.18;                     // fixed sim dt for stability
       for (let s = 0; s < cfg.substeps; s++) step(dt);
       recenter();
       tryBind();                           // polymerization happens once per frame
+      updateEnzymes(false);                // CPU path: enzymes edit the arrays directly
     }
   } catch (e) {
     console.error('GPU physics failed, falling back to CPU:', e);
@@ -1089,6 +1430,7 @@ function animate() {
   runPhysics();                        // fire-and-forget: never blocks this frame's render
 
   syncInstances();                     // render from the latest positions we have
+  syncEnzymeInstances();
   syncBondLines();
   if (!renderer.xr.isPresenting) controls.update();   // head tracking replaces orbit in VR
   renderer.render(scene, camera);
@@ -1118,6 +1460,11 @@ function bindSlider(id, key, fmt, onChange) {
 bindSlider('monomers', 'monomers', v => v | 0, spawnSoup);
 bindSlider('bindProb', 'bindProb', v => v.toFixed(3));
 bindSlider('chem', 'chem', v => (v > 0 ? '+' : '') + v.toFixed(2));
+bindSlider('monomerase', 'monomerase', v => v | 0, () => syncEnzymes(false));
+bindSlider('polymerase', 'polymerase', v => v | 0, () => syncEnzymes(false));
+bindSlider('enzSpeed', 'enzSpeed', v => v.toFixed(2));
+bindSlider('enzSize', 'enzSize', v => v.toFixed(1));
+bindSlider('enzBias', 'enzBias', v => v.toFixed(2));
 bindSlider('radius', 'radius', v => v.toFixed(2));
 bindSlider('interact', 'interact', v => v.toFixed(2));
 bindSlider('bondLen', 'bondLen', v => v.toFixed(2));
@@ -1352,6 +1699,11 @@ window.__dbg = {
   get prev() { return prev; },
   cut(i) { return cutAt(i); },
   get gpu() { return !!gpu; },
+  get enzCount() { return enzCount; },
+  get enzPos() { return enzPos; },
+  get enzKindA() { return enzKindA; },
+  get enzTarget() { return enzTarget; },
+  get enzCarry() { return enzCarry; },
   molecules() { let m = 0; for (let i = 0; i < ballCount; i++) if (kind[i] === HEAD && prev[i] < 0) m++; return m; },
   bonds() { let b = 0; for (let i = 0; i < ballCount; i++) if (kind[i] === TAIL && next[i] >= 0) b++; return b; },
   pinBall(i, x, y, z) { dragBall = i; dragWorld.set(x, y, z); },
