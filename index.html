@@ -426,7 +426,7 @@ function tokenize(src) {
     if (isIdStart(c)) { let j = i + 1; while (j < n && isIdChar(src[j])) j++; toks.push({ t: 'id', v: src.slice(i, j), pos: i }); i = j; continue; }
     if (isDigit(c)) { let j = i + 1; while (j < n && (isDigit(src[j]) || src[j] === '.')) j++; toks.push({ t: 'num', v: src.slice(i, j), pos: i }); i = j; continue; }
     if ((c === '!' || c === '=') && src[i + 1] === '=') { toks.push({ t: 'op', v: c + '=', pos: i }); i += 2; continue; }
-    if ('{}()[];:=.|*'.indexOf(c) >= 0) { toks.push({ t: 'op', v: c, pos: i }); i++; continue; }
+    if ('{}()[];:=.|*!'.indexOf(c) >= 0) { toks.push({ t: 'op', v: c, pos: i }); i++; continue; }
     i++; // skip anything unexpected
   }
   toks.push({ t: 'eof', v: '<end of input>', pos: n });   // sentinel so errors always have a token
@@ -588,14 +588,17 @@ function parseProgram(src, srcName) {
       if (last === 'kind') return { k: 'kindOf', segs: segs(ids.slice(0, -1)) };
       if (last === 'state') return { k: 'stateOf', segs: segs(ids.slice(0, -1)) };
       if (ids.length === 1 && isKind(ids[0])) return { k: 'kindLit', v: kindIndex.get(ids[0]) };
-      if (ids.length === 1) return { k: 'stateLit', v: getState(ids[0]) };
-      return { k: 'kindOf', segs: segs(ids) };
+      if (ids.length === 1 && !isOwnSlot(ids[0])) return { k: 'stateLit', v: getState(ids[0]) };
+      return { k: 'kindOf', segs: segs(ids) };   // a bond path (e.g. original, original.next)
     }
+    // cond := '!' cond | operand (('==' | '!=') operand)?
+    // A bare operand is a presence test: true if it resolves, false if any link is
+    // missing. `!` negates. So `!original.next` is true when original or its next is unbound.
     function parseCond() {
+      if (atA('!')) { q++; return { type: 'not', cond: parseCond() }; }
       const a = parseOperand();
-      const opv = nextA().v;           // '==' or '!='
-      const b = parseOperand();
-      return { op: opv, a, b };
+      if (atA('==') || atA('!=')) { const opv = nextA().v; return { type: 'cmp', op: opv, a, b: parseOperand() }; }
+      return { type: 'present', a };
     }
     function parseOne() {
       if (atA('go')) { q++; const tok = cur(); const name = expectIdA(); const ins = { op: 'go', to: -1, name, tok }; gofix.push(ins); eatSemi(); return ins; }
@@ -870,9 +873,12 @@ function evalOperand(self, o) {
   if (b < 0) return COND_ERR;                       // referenced ball missing
   return o.k === 'kindOf' ? kindId[b] : stateId[b];
 }
-// A condition whose operands can't be resolved is treated as FALSE: e.g.
-// `if (copy.kind != End) go clone;` simply falls through when `copy` is unbound.
+// Conditions whose operands can't be resolved are FALSE (so `if (copy.kind != End)`
+// falls through when `copy` is unbound). A bare operand is a presence test (true if it
+// resolves); `!` negates — e.g. `if (!original.next) …` fires when original/next is unbound.
 function evalCond(self, c) {
+  if (c.type === 'not') return !evalCond(self, c.cond);
+  if (c.type === 'present') return evalOperand(self, c.a) !== COND_ERR;
   const a = evalOperand(self, c.a), b = evalOperand(self, c.b);
   if (a === COND_ERR || b === COND_ERR) return false;
   return c.op === '==' ? a === b : a !== b;
