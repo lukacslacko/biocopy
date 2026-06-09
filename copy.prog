@@ -139,7 +139,7 @@ ball Monomerase {
 	retarget_after 5s;
 
 	{
-		sleep 5s;
+		drift 5s;
 		if (!chain.next) chain = Cap;
 		next = chain.next;
 		replace chain with chain.kind;
@@ -148,8 +148,8 @@ ball Monomerase {
 };
 
 scenario Test {
-	Cap * 2;
-	End * 2;
+	Cap * 20;
+	End * 20;
 	Info_1 * 100;
 	Info_2 * 100;
 	Info_3 * 100;
