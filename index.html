@@ -386,6 +386,7 @@ const stateId = new Int32Array(MAX_BALLS);                 // index into stateNa
 const bond = new Int32Array(MAX_BALLS * MAX_SLOTS).fill(-1); // directed slots (VM-facing)
 const nbr  = new Int32Array(MAX_BALLS * MAX_NBR).fill(-1);   // undirected adjacency (physics)
 const seekTarget = new Int32Array(MAX_BALLS).fill(-1);     // ball this one is swimming toward, or -1
+const driftDir = new Float32Array(MAX_BALLS * 3);          // steady extra force while drifting (0 = none)
 let ballCount = 0;
 let colorsDirty = true;
 let statsDirty = true;
@@ -403,6 +404,7 @@ const bindOwner = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);
 const bindSlot  = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);
 const bindTarget = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);
 const bindWantKind = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);  // kindFind binds lock onto this kind
+const drifting = new Uint8Array(MAX_BALLS * MAX_LISTS);   // 1 while this list's `drift` is running
 const inActive = new Uint8Array(MAX_BALLS);
 let activeList = [];
 
@@ -417,6 +419,7 @@ let slotNames = [];               // slot id -> name
 let stateIndex = new Map();       // state name -> id
 let stateNames = [];              // state id -> name
 let scenarios = new Map();        // name -> [scenario stmt]
+let kindSubtypes = [];            // kindId -> Set of that kind's id + all descendants' ids
 
 // Render meshes
 const ballGeo = new THREE.SphereGeometry(1, 18, 14);
@@ -625,11 +628,11 @@ function parseProgram(src, srcName) {
     }
     function parseOne() {
       if (atA('go')) { q++; const tok = cur(); const name = expectIdA(); const ins = { op: 'go', to: -1, name, tok }; gofix.push(ins); eatSemi(); return ins; }
-      if (atA('sleep')) {
-        q++; const num = parseFloat(nextA().v); let ms = num * 1000;
+      if (atA('sleep') || atA('drift')) {
+        const op = nextA().v; const num = parseFloat(nextA().v); let ms = num * 1000;
         if (isIdA() && T[q].v === 'ms') { q++; ms = num; }
         else if (isIdA() && T[q].v === 's') { q++; ms = num * 1000; }
-        eatSemi(); return { op: 'sleep', ms };
+        eatSemi(); return { op, ms };
       }
       if (atA('if')) { q++; expectA('('); const cond = parseCond(); expectA(')'); const inner = parseOne(); return { op: 'if', cond, inner }; }
       const lhs = parseDotted(); expectA('=');
@@ -718,6 +721,18 @@ function parseProgram(src, srcName) {
 
   // Build kind defs, then compile each kind's (possibly several, weighted) action lists.
   for (const b of ballsRaw) kinds.set(b.name, { name: b.name, parent: b.parent, slots: mergedSlots(b.name), programs: [], totalWeight: 0 });
+
+  // For each kind, the set of its own id + all descendants' ids, so finding by kind
+  // ("info = Info") also matches subkinds ("ball Info_1: Info {}").
+  kindSubtypes = kindList.map(() => new Set());
+  for (let k = 0; k < kindList.length; k++) {
+    let name = kindList[k]; const seen = new Set();
+    while (name && kindIndex.has(name) && !seen.has(name)) {   // walk up to each ancestor, record k as one of its subtypes
+      seen.add(name);
+      kindSubtypes[kindIndex.get(name)].add(k);
+      const d = kinds.get(name); name = d ? d.parent : null;
+    }
+  }
   for (const b of ballsRaw) {
     const def = kinds.get(b.name);
     const lists = inheritedActionLists(b.name);
@@ -810,7 +825,7 @@ function spawnScenario(name) {
   ballCount = 0;
   activeList = [];
   inActive.fill(0);
-  bond.fill(-1); nbr.fill(-1); seekTarget.fill(-1); pc.fill(-1); vmStatus.fill(0);
+  bond.fill(-1); nbr.fill(-1); seekTarget.fill(-1); pc.fill(-1); vmStatus.fill(0); driftDir.fill(0); drifting.fill(0); driftDirty = true;
 
   const R = Math.max(2, cfg.containR - 2 * cfg.interact);
   const L0 = cfg.bondLen * cfg.interact;
@@ -926,6 +941,12 @@ function execInstr(self, l, ins, now) {
   switch (ins.op) {
     case 'go': pc[idx] = ins.to; return 'jump';
     case 'sleep': vmStatus[idx] = VM_SLEEP; vmSleepUntil[idx] = now + ins.ms; return 'next';
+    case 'drift': {                              // like sleep, but drift in a random direction
+      const d = randomUnit();
+      driftDir[self * 3] = d.x * SWIM_ACCEL; driftDir[self * 3 + 1] = d.y * SWIM_ACCEL; driftDir[self * 3 + 2] = d.z * SWIM_ACCEL;
+      driftDirty = true; drifting[idx] = 1;
+      vmStatus[idx] = VM_SLEEP; vmSleepUntil[idx] = now + ins.ms; return 'next';
+    }
     case 'setkind': {
       const t = resolvePath(self, ins.target);
       if (t < 0) { logOnce(`${kindList[kindId[self]]}: setkind on missing ball`); return 'next'; }
@@ -953,8 +974,9 @@ function execInstr(self, l, ins, now) {
       let T, wantKind = -1;
       if (ins.rhs.type === 'kindFind') {
         wantKind = ins.rhs.kindId;
+        const subs = kindSubtypes[wantKind];       // the kind and all its descendants
         T = findNearest(pos[self * 3], pos[self * 3 + 1], pos[self * 3 + 2],
-          i => i !== owner && kindId[i] === wantKind && bond[owner * MAX_SLOTS + ins.slot] !== i);
+          i => i !== owner && subs.has(kindId[i]) && bond[owner * MAX_SLOTS + ins.slot] !== i);
         if (T < 0) return 'retry';                 // none of that kind around yet — try again next step
       } else {
         T = resolvePath(self, ins.rhs.segs);
@@ -977,7 +999,7 @@ function swimTick(self, l) {
   const owner = bindOwner[idx], want = bindWantKind[idx];
   const T = bindTarget[idx];
   let valid = T >= 0 && T < ballCount && owner >= 0 && owner < ballCount;
-  if (valid && want >= 0 && kindId[T] !== want) valid = false;     // target changed identity
+  if (valid && want >= 0 && !kindSubtypes[want].has(kindId[T])) valid = false;   // target changed to a non-matching kind
   if (!valid) { if (seekTarget[self] === T) seekTarget[self] = -1; bindTarget[idx] = -1; vmStatus[idx] = VM_RUN; return 'abort'; }
   seekTarget[self] = T;                                            // keep thrusting toward it
   const bd = bindDist();
@@ -994,7 +1016,11 @@ function swimTick(self, l) {
 function tickList(self, l, instrs, now) {
   if (instrs.length === 0) return;
   const idx = self * MAX_LISTS + l;
-  if (vmStatus[idx] === VM_SLEEP) { if (now < vmSleepUntil[idx]) return; vmStatus[idx] = VM_RUN; }
+  if (vmStatus[idx] === VM_SLEEP) {
+    if (now < vmSleepUntil[idx]) return;
+    vmStatus[idx] = VM_RUN;
+    if (drifting[idx]) { drifting[idx] = 0; driftDir[self * 3] = driftDir[self * 3 + 1] = driftDir[self * 3 + 2] = 0; driftDirty = true; }
+  }
   if (vmStatus[idx] === VM_SWIM) {
     if (swimTick(self, l) === 'done') { pc[idx]++; if (pc[idx] >= instrs.length) pc[idx] = 0; }
     return;                                          // 'abort' re-runs the bind next time; 'wait' keeps swimming
@@ -1019,7 +1045,7 @@ function stepBall(self, now) {
   tickList(self, l, progs[l].instrs, now);
 }
 
-let seekDirtyForGPU = false;
+let seekDirtyForGPU = false, driftDirty = false;
 function updatePrograms(now) {
   if (!activeList.length) return;
   for (let e = 0; e < activeList.length; e++) stepBall(activeList[e], now);
@@ -1085,13 +1111,15 @@ function step(dt) {
     }
   }
 
-  // Seek thrust: a steady pull toward each swimmer's bind target.
+  // Seek thrust toward a bind target, plus any steady drift force.
   for (let e = 0; e < activeList.length; e++) {
-    const i = activeList[e], t = seekTarget[i];
-    if (t < 0 || t >= n) continue;
-    const dx = pos[t * 3] - pos[i * 3], dy = pos[t * 3 + 1] - pos[i * 3 + 1], dz = pos[t * 3 + 2] - pos[i * 3 + 2];
-    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    if (d > 1e-6) { const s = SWIM_ACCEL / d; force[i * 3] += s * dx; force[i * 3 + 1] += s * dy; force[i * 3 + 2] += s * dz; }
+    const i = activeList[e], o = i * 3, t = seekTarget[i];
+    if (t >= 0 && t < n) {
+      const dx = pos[t * 3] - pos[o], dy = pos[t * 3 + 1] - pos[o + 1], dz = pos[t * 3 + 2] - pos[o + 2];
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (d > 1e-6) { const s = SWIM_ACCEL / d; force[o] += s * dx; force[o + 1] += s * dy; force[o + 2] += s * dz; }
+    }
+    force[o] += driftDir[o]; force[o + 1] += driftDir[o + 1]; force[o + 2] += driftDir[o + 2];
   }
 
   if (cfg.jiggle > 0) { const j = cfg.jiggle; for (let i = 0; i < n * 3; i++) force[i] += (Math.random() * 2 - 1) * j; }
@@ -1243,6 +1271,7 @@ struct Params {
 @group(0) @binding(5) var<storage, read_write> cellItems: array<u32>;
 @group(0) @binding(6) var<storage, read> nbrb: array<i32>;
 @group(0) @binding(7) var<storage, read> seekb: array<i32>;
+@group(0) @binding(8) var<storage, read> driftb: array<f32>;
 
 fn pv(i: u32) -> vec3<f32> { return vec3<f32>(pos[3u*i], pos[3u*i+1u], pos[3u*i+2u]); }
 fn springForce(d: vec3<f32>) -> vec3<f32> { let l = length(d); if (l < 1e-6) { return vec3<f32>(0.0); } return (P.kSpring * (l - P.restLen) / l) * d; }
@@ -1289,6 +1318,7 @@ fn isNbr(i: u32, j: u32) -> bool { for (var s = 0u; s < P.maxNbr; s = s + 1u) { 
   }
   let st = seekb[i];
   if (st >= 0) { let d = pv(u32(st)) - pi; let l = length(d); if (l > 1e-6) { f += (P.swimAccel / l) * d; } }
+  f += vec3<f32>(driftb[3u*i], driftb[3u*i+1u], driftb[3u*i+2u]);   // steady drift force (0 when not drifting)
   if (P.containK > 0.0) { let d = length(pi); if (d > P.containR) { f += (-P.containK * (d - P.containR) / d) * pi; } }
   force[3u*i] = f.x; force[3u*i+1u] = f.y; force[3u*i+2u] = f.z;
 }
@@ -1324,6 +1354,7 @@ async function createGPUEngine() {
     const cellItemsBuf = mk(numCells * CELL_CAP * 4, U.STORAGE);
     const nbrBuf       = mk(MAX_BALLS * MAX_NBR * 4, U.STORAGE | U.COPY_DST);
     const seekBuf      = mk(MAX_BALLS * 4, U.STORAGE | U.COPY_DST);
+    const driftBuf     = mk(fbytes, U.STORAGE | U.COPY_DST);
     const posStaging   = mk(fbytes, U.MAP_READ | U.COPY_DST);
 
     const module = device.createShaderModule({ code: PHYS_WGSL });
@@ -1331,7 +1362,7 @@ async function createGPUEngine() {
       const info = await module.getCompilationInfo();
       for (const m of info.messages) if (m.type === 'error') console.error('WGSL', m.lineNum + ':' + m.linePos, m.message);
     }
-    const bgl = device.createBindGroupLayout({ entries: [0,1,2,3,4,5,6,7].map(binding => ({
+    const bgl = device.createBindGroupLayout({ entries: [0,1,2,3,4,5,6,7,8].map(binding => ({
       binding, visibility: GPUShaderStage.COMPUTE,
       buffer: { type: binding === 0 ? 'uniform' : (binding >= 6 ? 'read-only-storage' : 'storage') },
     })) });
@@ -1339,7 +1370,7 @@ async function createGPUEngine() {
     const pipe = ep => device.createComputePipeline({ layout: pl, compute: { module, entryPoint: ep } });
     const pipes = { clear: pipe('clearGrid'), build: pipe('buildGrid'), forces: pipe('computeForces'), integrate: pipe('integrate') };
     const bind = device.createBindGroup({ layout: bgl,
-      entries: [paramsBuf, posBuf, velBuf, forceBuf, cellCountBuf, cellItemsBuf, nbrBuf, seekBuf].map((buffer, binding) => ({ binding, resource: { buffer } })) });
+      entries: [paramsBuf, posBuf, velBuf, forceBuf, cellCountBuf, cellItemsBuf, nbrBuf, seekBuf, driftBuf].map((buffer, binding) => ({ binding, resource: { buffer } })) });
 
     const pbuf = new ArrayBuffer(96);
     const pu = new Uint32Array(pbuf), pf = new Float32Array(pbuf);
@@ -1387,9 +1418,11 @@ async function createGPUEngine() {
         device.queue.writeBuffer(velBuf, 0, vel, 0, n * 3);
         device.queue.writeBuffer(nbrBuf, 0, nbr, 0, n * MAX_NBR);
         device.queue.writeBuffer(seekBuf, 0, seekTarget, 0, n);
+        device.queue.writeBuffer(driftBuf, 0, driftDir, 0, n * 3);
       },
       uploadBonds(n) { device.queue.writeBuffer(nbrBuf, 0, nbr, 0, n * MAX_NBR); },
       uploadSeek(n) { device.queue.writeBuffer(seekBuf, 0, seekTarget, 0, n); },
+      uploadDrift(n) { device.queue.writeBuffer(driftBuf, 0, driftDir, 0, n * 3); },
       uploadPositions(n) { device.queue.writeBuffer(posBuf, 0, pos, 0, n * 3); },   // recenter only shifts positions; GPU keeps the authoritative velocities
     };
   } catch (e) {
@@ -1414,6 +1447,7 @@ async function runPhysics() {
     if (gpu) {
       if (gpuBondsDirty) { gpu.uploadBonds(ballCount); gpuBondsDirty = false; }
       if (seekDirtyForGPU) { gpu.uploadSeek(ballCount); seekDirtyForGPU = false; }
+      if (driftDirty) { gpu.uploadDrift(ballCount); driftDirty = false; }
       gpu.step(ballCount, cfg.substeps);
       await gpu.readPositions(ballCount);
       let didRecenter = false;
@@ -1580,6 +1614,7 @@ function debugHtml(b) {
     const prog = def.programs[l], idx = b * MAX_LISTS + l, cur = pc[idx], st = vmStatus[idx];
     let tag = stName[st] || st;
     if (st === VM_SWIM) tag += ` → ${dbgEsc(ballLabel(bindTarget[idx]))}`;
+    else if (st === VM_SLEEP && drifting[idx]) tag = 'drift';
     else if (cur < 0) tag = 'halted';
     h += `<div class="lh">list ${l} · weight ${prog.weight} · ${tag}</div>`;
     for (let i = 0; i < prog.instrs.length; i++) {

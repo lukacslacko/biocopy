@@ -126,91 +126,19 @@ ball Polymerase {
 		copy.next = material;
 		material.prev = copy;
 		copy = material;
-		if (copy.kind != End) go clone;
+		go clone;
 
 		end:
 		original = release;
 		material = release;
+		if (copy.kind != End) copy.kind = End;
 		copy = release;
 	};
-
-	/*
-	0.001 {
-		original = release;
-		material = release;
-		copy = release;
-	}
-	*/
 };
 
-/*
-====================
-A simple monomerase.
-====================
-*/
-ball Monomerase {
-	bond chain: End;
-	bond prev: Chain;
-
-	{
-		sleep 1s;
-		chain = End;
-
-		split:
-		sleep 0.1s;
-		if (!chain.prev) go end;
-		prev = chain.prev;
-		chain.prev = release;
-		prev.next = release;
-		chain.kind = Blank;
-		chain = prev;
-		if (chain.kind != Cap) go split;
-
-		end:
-		chain.kind = Blank;
-		prev.kind = Blank;
-		chain = release;
-		prev = release;
-	};
-
-	/*
-	0.001 {
-		start:
-		chain = release;
-		prev = release;
-		sleep 5s;
-	};
-	*/
-};
-
-/*
-A simple test scenario.
-*/
-/*
 scenario Test {
 	Blank * 1000;
 	Polymerase;
-	chain = Cap;
-	chain.next = Info_1;
-	chain = chain.next;
-	chain.next = Info_2;
-	chain = chain.next;
-	chain.next = Info_3;
-	chain = chain.next;
-	chain.next = End;
-};
-*/
-
-/*
-The Monomerase walks a chain backwards (chain.prev), so the template must be
-doubly linked: bonds are directed, so each `next` needs a matching `prev`. The
-`chain.next.prev = chain` line sets that back-link (the Polymerase likewise sets
-both copy.next and material.prev on every monomer it copies).
-*/
-scenario TestWithMonomerase {
-	Blank * 1000;
-	Polymerase;
-	Monomerase;
 	chain = Cap;
 	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
 	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
