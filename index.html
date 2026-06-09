@@ -173,7 +173,7 @@
 
   <div class="toggles">
     <label><input type="checkbox" id="showBonds" /> Bonds</label>
-    <label><input type="checkbox" id="retarget" /> Re-target stuck</label>
+    <label><input type="checkbox" id="retarget" checked /> Re-target stuck</label>
   </div>
 
   <div class="legend" id="legend">
@@ -364,7 +364,7 @@ const cfg = {
   showBonds: false,
   showContain: false,
   shadows: true,
-  retarget: false,      // re-target a `slot = Kind` swim that can't reach its target in time
+  retarget: true,       // re-target a `slot = Kind` swim that can't reach its target in time
 };
 
 // ---------------------------------------------------------------------------
@@ -399,6 +399,7 @@ const driftDir = new Float32Array(MAX_BALLS * 3);          // steady extra force
 const driftUntil = new Float64Array(MAX_BALLS);           // when the drift force expires (cleared on time, not on list roll)
 let ballCount = 0;
 let colorsDirty = true;
+let hoverKind = -1;               // kindId highlighted by hovering its legend row (-1 = none)
 let statsDirty = true;
 let gpuBondsDirty = false;        // nbr changed → re-upload before next GPU step
 let actionHappened = false;       // a ball changed a bond/kind/state this frame (drives the Next button)
@@ -437,6 +438,7 @@ let stateNames = [];              // state id -> name
 let scenarios = new Map();        // name -> [scenario stmt]
 let kindSubtypes = [];            // kindId -> Set of that kind's id + all descendants' ids
 let kindSpeed = new Float32Array(MAX_KINDS).fill(1);   // kindId -> swim/drift thrust multiplier
+let kindRetargetAfter = new Float32Array(MAX_KINDS);   // kindId -> ms before a stuck by-kind swim re-targets
 let repelMatrix = new Float32Array(MAX_KINDS * MAX_KINDS);   // [a*MAX_KINDS+b] = min separation a keeps from b
 let maxRepelDist = 0;             // largest repel distance (sizes the physics grid cell)
 let kindDirtyForGPU = false;      // kindId changed → re-upload before next GPU step
@@ -517,13 +519,14 @@ function parseProgram(src, srcName) {
     return inner;
   }
   const expectNum = () => { if (!toks[p] || toks[p].t !== 'num') fail(`expected a number but got '${toks[p].v}'`, toks[p]); return parseFloat(toks[p++].v); };
+  const expectDurMs = () => { const num = expectNum(); if (at('ms')) { p++; return num; } if (at('s')) p++; return num * 1000; };
   function parseBallRaw() {
     const name = expectId();
     let parent = null;
     if (at(':')) { p++; parent = expectId(); }
     expect('{');
     const slotDecls = [], actionLists = [], repels = [];   // actionLists: { weight, toks }; repels: { kind, dist }
-    let speed = null;
+    let speed = null, retargetAfter = null;
     while (!at('}')) {
       if (at('{')) { actionLists.push({ weight: 1.0, toks: captureBraced() }); if (at(';')) p++; }
       else if (toks[p] && toks[p].t === 'num' && toks[p + 1] && toks[p + 1].v === '{') {
@@ -531,6 +534,8 @@ function parseProgram(src, srcName) {
         actionLists.push({ weight: w, toks: captureBraced() }); if (at(';')) p++;
       } else if (at('speed')) {                       // speed <multiplier>;
         p++; speed = expectNum(); expect(';');
+      } else if (at('retarget_after')) {              // retarget_after <duration>;
+        p++; retargetAfter = expectDurMs(); expect(';');
       } else if (at('repel')) {                       // repel <Kind> <distance>;
         p++; const kind = expectId(); const dist = expectNum(); expect(';');
         repels.push({ kind, dist });
@@ -545,7 +550,7 @@ function parseProgram(src, srcName) {
     }
     expect('}');
     if (at(';')) p++;
-    return { name, parent, slotDecls, actionLists, speed, repels };
+    return { name, parent, slotDecls, actionLists, speed, repels, retargetAfter };
   }
   function parseScenRaw() {
     const name = expectId();
@@ -604,6 +609,12 @@ function parseProgram(src, srcName) {
     if (!b) return 1;
     if (b.speed != null) return b.speed;
     return b.parent ? mergedSpeed(b.parent) : 1;
+  }
+  function mergedRetargetAfter(name) {   // own retarget_after, else inherited, else default (SWIM_TIMEOUT_MS)
+    const b = rawByName.get(name);
+    if (!b) return SWIM_TIMEOUT_MS;
+    if (b.retargetAfter != null) return b.retargetAfter;
+    return b.parent ? mergedRetargetAfter(b.parent) : SWIM_TIMEOUT_MS;
   }
   function mergedRepels(name, seen) {   // parent's repels + own
     seen = seen || new Set();
@@ -786,10 +797,12 @@ function parseProgram(src, srcName) {
   // repelMatrix[a*MAX_KINDS + b] = min separation a wants to keep from b (0 = none),
   // expanded to subkinds of the repelled kind. maxRepelDist sizes the physics grid.
   kindSpeed = new Float32Array(MAX_KINDS).fill(1);
+  kindRetargetAfter = new Float32Array(MAX_KINDS).fill(SWIM_TIMEOUT_MS);
   repelMatrix = new Float32Array(MAX_KINDS * MAX_KINDS);
   maxRepelDist = 0;
   for (let k = 0; k < kindList.length; k++) {
     kindSpeed[k] = mergedSpeed(kindList[k]);
+    kindRetargetAfter[k] = mergedRetargetAfter(kindList[k]);
     for (const r of mergedRepels(kindList[k])) {
       if (!kindIndex.has(r.kind)) { console.warn(`[program] repel: unknown kind '${r.kind}'`); continue; }
       for (const b of kindSubtypes[kindIndex.get(r.kind)]) {
@@ -1110,7 +1123,7 @@ function tickList(self, l, instrs, now) {
   if (vmStatus[idx] === VM_SWIM) {
     // A by-kind swim that can't reach its target in time (e.g. blocked by `repel`, or
     // chasing a ball another agent is dragging) re-shuffles to the nearest other candidate.
-    if (cfg.retarget && bindWantKind[idx] >= 0 && now - swimSince[idx] > SWIM_TIMEOUT_MS) {
+    if (cfg.retarget && bindWantKind[idx] >= 0 && now - swimSince[idx] > kindRetargetAfter[kindId[self]]) {
       const owner = bindOwner[idx], slot = bindSlot[idx], oldT = bindTarget[idx];
       logStuck(self, bindWantKind[idx], oldT, now - swimSince[idx]);
       const nt = findNearbyKind(self, owner, slot, bindWantKind[idx], oldT);
@@ -1268,12 +1281,14 @@ function syncInstances() {
   instMesh.count = n;
   // Shrink the balls while bonds are shown so the (thicker) bond lines are visible.
   const s = cfg.radius * (cfg.showBonds ? BOND_VIEW_BALL_SCALE : 1);
+  const hoverSet = hoverKind >= 0 ? kindSubtypes[hoverKind] : null;   // hovered kind + its descendants
   const m = instMesh.instanceMatrix.array;
   for (let i = 0; i < n; i++) {
     const o = i * 16, b = i * 3;
-    m[o] = s;   m[o+1] = 0; m[o+2] = 0;  m[o+3] = 0;
-    m[o+4] = 0; m[o+5] = s; m[o+6] = 0;  m[o+7] = 0;
-    m[o+8] = 0; m[o+9] = 0; m[o+10] = s; m[o+11] = 0;
+    const ss = (hoverSet && hoverSet.has(kindId[i])) ? s * 2 : s;   // hovered kind (incl. subkinds) drawn double-size
+    m[o] = ss;  m[o+1] = 0; m[o+2] = 0;   m[o+3] = 0;
+    m[o+4] = 0; m[o+5] = ss; m[o+6] = 0;  m[o+7] = 0;
+    m[o+8] = 0; m[o+9] = 0; m[o+10] = ss; m[o+11] = 0;
     m[o+12] = pos[b]; m[o+13] = pos[b+1]; m[o+14] = pos[b+2]; m[o+15] = 1;
   }
   instMesh.instanceMatrix.needsUpdate = true;
@@ -1282,6 +1297,18 @@ function syncInstances() {
     for (let i = 0; i < n; i++) { tmpColor.copy(kindColor(kindList[kindId[i]])); instMesh.setColorAt(i, tmpColor); }
     if (instMesh.instanceColor) instMesh.instanceColor.needsUpdate = true;
     colorsDirty = false;
+  }
+  // Animate a bright cycling rainbow on the hovered kind's balls (until hover ends,
+  // when colorsDirty is set to restore their normal colors).
+  if (hoverSet && instMesh.instanceColor) {
+    const t = performance.now() * 0.0006;
+    let any = false;
+    for (let i = 0; i < n; i++) {
+      if (!hoverSet.has(kindId[i])) continue;
+      tmpColor.setHSL(((t + i * 0.05) % 1 + 1) % 1, 1.0, 0.6);
+      instMesh.setColorAt(i, tmpColor); any = true;
+    }
+    if (any) instMesh.instanceColor.needsUpdate = true;
   }
 }
 
@@ -1335,10 +1362,15 @@ function refreshCounts() {
     if (j > i) { bonds++; const ri = find(i), rj = find(j); if (ri !== rj) uf[ri] = rj; }
   }
   let mol = 0; for (let i = 0; i < n; i++) if (find(i) === i) mol++;
-  const counts = new Int32Array(kindList.length);
-  for (let i = 0; i < n; i++) counts[kindId[i]]++;
+  const exact = new Int32Array(kindList.length);
+  for (let i = 0; i < n; i++) exact[kindId[i]]++;
   ballCountEl.textContent = n; molCountEl.textContent = mol; bondCountEl.textContent = bonds;
-  for (let k = 0; k < kindCountEls.length; k++) if (kindCountEls[k]) kindCountEls[k].textContent = counts[k] || 0;
+  // Each kind's count includes its descendants (Chain counts Cap/Info/End/…, Info counts the Info_*s).
+  for (let k = 0; k < kindCountEls.length; k++) {
+    if (!kindCountEls[k]) continue;
+    let c = 0; for (const j of kindSubtypes[k]) c += exact[j];
+    kindCountEls[k].textContent = c;
+  }
 }
 
 // Build the legend (one row per defined kind) after a program is parsed.
@@ -1354,6 +1386,10 @@ function buildLegend() {
     const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = name;
     const ct = document.createElement('span'); ct.className = 'ct'; ct.textContent = '0';
     row.appendChild(sw); row.appendChild(nm); row.appendChild(ct);
+    row.style.cursor = 'default';
+    const kid = k;   // hovering a row highlights that kind's balls (rainbow + double size)
+    row.addEventListener('mouseenter', () => { hoverKind = kid; colorsDirty = true; });
+    row.addEventListener('mouseleave', () => { if (hoverKind === kid) { hoverKind = -1; colorsDirty = true; } });
     el.appendChild(row);
     kindCountEls[k] = ct;
   }
@@ -1858,7 +1894,8 @@ function debugHtml(b) {
   h += `<div class="meta">bonds: ${bonds.length ? bonds.join('  ') : '(none)'}</div>`;
   const props = [];
   const ki = kindId[b];
-  if (kindSpeed[ki] !== 1) props.push(`speed ${kindSpeed[ki]}`);
+  if (kindSpeed[ki] !== 1) props.push(`speed ${+kindSpeed[ki].toFixed(3)}`);
+  if (kindRetargetAfter[ki] !== SWIM_TIMEOUT_MS) props.push(`retarget_after ${+(kindRetargetAfter[ki] / 1000).toFixed(3)}s`);
   for (let k = 0; k < kindList.length; k++) { const d = repelMatrix[ki * MAX_KINDS + k]; if (d > 0) props.push(`repel ${dbgEsc(kindList[k])} ${d}`); }
   if (props.length) h += `<div class="meta">${props.join('  ·  ')}</div>`;
   if (maxRepelDist > 0) {
@@ -1873,7 +1910,7 @@ function debugHtml(b) {
     if (st === VM_SWIM) {
       const secs = (performance.now() - swimSince[idx]) / 1000;
       tag += ` → ${dbgEsc(ballLabel(bindTarget[idx]))}  ${secs.toFixed(1)}s`;
-      if (secs * 1000 > SWIM_TIMEOUT_MS) tag += ' ⚠ stuck (will re-target)';
+      if (secs * 1000 > kindRetargetAfter[kindId[b]]) tag += ' ⚠ stuck (will re-target)';
     } else if (st === VM_SLEEP && drifting[idx]) tag = 'drift';
     else if (cur < 0) tag = 'halted';
     // a `slot = Kind` that keeps finding nothing (e.g. that kind is used up)

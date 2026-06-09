@@ -149,6 +149,7 @@ ball Monomerase {
 	
 	speed 0.1;
 	repel Polymerase 5;
+	retarget_after 5s;
 
 	{
 		sleep 3s;
