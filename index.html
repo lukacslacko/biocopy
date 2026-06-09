@@ -130,6 +130,23 @@
     font-size: 11px; text-align: right;
   }
   #hint .hint-dim { color: var(--ink-dim); opacity: .8; }
+
+  /* Debug tooltip: hold D over a ball to inspect its action lists. */
+  #dbg {
+    position: fixed; z-index: 60; pointer-events: none; display: none;
+    max-width: 380px; max-height: 70vh; overflow: hidden;
+    background: rgba(10, 12, 18, 0.95);
+    border: 1px solid var(--panel-border); border-radius: 9px;
+    padding: 8px 10px; box-shadow: 0 10px 36px rgba(0,0,0,.55);
+    font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--ink-dim);
+  }
+  #dbg .hdr { color: var(--ink); font-weight: 650; margin-bottom: 4px; }
+  #dbg .meta { color: var(--ink-dim); margin-bottom: 2px; }
+  #dbg .lh { color: var(--accent); margin-top: 6px; }
+  #dbg .row { white-space: pre-wrap; }
+  #dbg .lbl { color: var(--accent-2); opacity: .85; }
+  #dbg .cur { background: rgba(110,168,254,0.30); color: var(--ink); border-radius: 3px; }
 </style>
 </head>
 <body>
@@ -215,7 +232,8 @@
 </div>
 
 <div id="stats">balls <b id="ballCount">0</b> · molecules <b id="molCount">0</b> · bonds <b id="bondCount">0</b> · <b id="fps">0</b> fps · <b id="mode">…</b></div>
-<div id="hint"><span class="hint-dim">drag empty space to orbit · scroll to zoom · right-drag to pan</span></div>
+<div id="hint"><span class="hint-dim">drag empty space to orbit · scroll to zoom · right-drag to pan · hold <b>D</b> over a ball to inspect</span></div>
+<div id="dbg"></div>
 
 <script type="importmap">
 {
@@ -619,13 +637,23 @@ function parseProgram(src, srcName) {
       return { op: 'bind', owner, slot, rhs };
     }
 
+    const labels = new Map();   // instruction index -> [label names] (for the debug view)
     while (q < T.length) {
       // A label is a pure marker → it points at the next real instruction (no no-op emitted).
-      if (isIdA() && T[q + 1] && T[q + 1].v === ':') { const name = nextA().v; q++; labelMap.set(name, instrs.length); continue; }
-      instrs.push(parseOne());
+      if (isIdA() && T[q + 1] && T[q + 1].v === ':') {
+        const name = nextA().v; q++; labelMap.set(name, instrs.length);
+        if (!labels.has(instrs.length)) labels.set(instrs.length, []);
+        labels.get(instrs.length).push(name);
+        continue;
+      }
+      const startTok = T[q];
+      const ins = parseOne();
+      const endTok = T[q - 1] || startTok;
+      ins.src = src.slice(startTok.pos, endTok.pos + endTok.v.length).replace(/\s+/g, ' ').trim();   // original text (for the debug tooltip)
+      instrs.push(ins);
     }
     for (const g of gofix) { if (!labelMap.has(g.name)) fail(`in ball '${def.name}': unknown label '${g.name}'`, g.tok); g.to = labelMap.get(g.name); }
-    return instrs;
+    return { instrs, labels };
   }
 
   // Compile a scenario body into builder statements.
@@ -689,7 +717,7 @@ function parseProgram(src, srcName) {
     const def = kinds.get(b.name);
     const lists = inheritedActionLists(b.name);
     if (lists.length > MAX_LISTS) throw new Error(`ball '${b.name}' has too many action lists (max ${MAX_LISTS})`);
-    def.programs = lists.map(L => ({ weight: L.weight, instrs: compileActions(L.toks, def) }));
+    def.programs = lists.map(L => { const c = compileActions(L.toks, def); return { weight: L.weight, instrs: c.instrs, labels: c.labels }; });
     def.totalWeight = def.programs.reduce((s, p) => s + p.weight, 0);
   }
   for (const s of scenRaw) scenarios.set(s.name, compileScenario(s.bodyToks, s.name));
@@ -1402,6 +1430,7 @@ function animate() {
   syncBondLines();
   controls.update();
   renderer.render(scene, camera);
+  updateDebugTooltip();                 // live action-list inspector while D is held
 
   fpsAccum += frameDt; fpsFrames++;
   if (fpsAccum >= 0.5) { fpsEl.textContent = Math.round(fpsFrames / fpsAccum); fpsAccum = 0; fpsFrames = 0; }
@@ -1486,6 +1515,82 @@ document.getElementById('showContain').addEventListener('change', e => { cfg.sho
 
 function updateContainSphere() { containSphere.scale.setScalar(cfg.containR); containSphere.visible = cfg.showContain; }
 
+// ---------------------------------------------------------------------------
+// Debug inspector: hold D over a ball to see its action lists, with the row each
+// list is currently executing highlighted. The ball is locked on key-down, so it
+// keeps showing even as the ball drifts away from the pointer.
+// ---------------------------------------------------------------------------
+let dbgBall = -1, dbgActive = false, ptrX = 0, ptrY = 0;
+const dbgRay = new THREE.Raycaster();
+const dbgNdc = new THREE.Vector2();
+const dbgProj = new THREE.Vector3();
+const dbgEl = document.getElementById('dbg');
+
+renderer.domElement.addEventListener('pointermove', e => { ptrX = e.clientX; ptrY = e.clientY; });
+
+function pickBallAt(clientX, clientY) {
+  if (!ballCount) return -1;
+  const rect = renderer.domElement.getBoundingClientRect();
+  dbgNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  dbgNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  dbgRay.setFromCamera(dbgNdc, camera);
+  instMesh.computeBoundingSphere();
+  const hits = dbgRay.intersectObject(instMesh);
+  return hits.length && hits[0].instanceId != null ? hits[0].instanceId : -1;
+}
+
+window.addEventListener('keydown', e => {
+  if ((e.key === 'd' || e.key === 'D') && !dbgActive) {     // lock onto the pointed ball
+    const b = pickBallAt(ptrX, ptrY);
+    if (b >= 0) { dbgBall = b; dbgActive = true; }
+  }
+});
+window.addEventListener('keyup', e => {
+  if (e.key === 'd' || e.key === 'D') { dbgActive = false; if (dbgEl) dbgEl.style.display = 'none'; }
+});
+
+const dbgEsc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+function ballLabel(i) { return (i >= 0 && i < ballCount) ? `#${i} ${kindList[kindId[i]]}` : (i < 0 ? '∅' : `#${i}`); }
+function debugHtml(b) {
+  const kn = kindList[kindId[b]], def = kinds.get(kn);
+  let h = `<div class="hdr">ball #${b} · ${dbgEsc(kn)} · state ${dbgEsc(stateNames[stateId[b]] || stateId[b])}</div>`;
+  const bonds = [];
+  for (let s = 0; s < slotNames.length; s++) { const t = bond[b * MAX_SLOTS + s]; if (t >= 0) bonds.push(`${dbgEsc(slotNames[s])}→${dbgEsc(ballLabel(t))}`); }
+  h += `<div class="meta">bonds: ${bonds.length ? bonds.join('  ') : '(none)'}</div>`;
+  if (!def || !def.programs.length) return h + `<div class="meta">(no program — inert ball)</div>`;
+  const stName = ['run', 'swim', 'sleep'];
+  for (let l = 0; l < def.programs.length; l++) {
+    const prog = def.programs[l], idx = b * MAX_LISTS + l, cur = pc[idx], st = vmStatus[idx];
+    let tag = stName[st] || st;
+    if (st === VM_SWIM) tag += ` → ${dbgEsc(ballLabel(bindTarget[idx]))}`;
+    else if (cur < 0) tag = 'halted';
+    h += `<div class="lh">list ${l} · weight ${prog.weight} · ${tag}</div>`;
+    for (let i = 0; i < prog.instrs.length; i++) {
+      const lbls = prog.labels.get(i);
+      if (lbls) h += `<div class="row lbl">${dbgEsc(lbls.join(': '))}:</div>`;
+      const isCur = i === cur;
+      h += `<div class="row${isCur ? ' cur' : ''}">${isCur ? '▶ ' : '  '}${dbgEsc(prog.instrs[i].src || '?')}</div>`;
+    }
+  }
+  return h;
+}
+function updateDebugTooltip() {
+  if (!dbgEl) return;
+  if (!dbgActive || dbgBall < 0 || dbgBall >= ballCount) { dbgEl.style.display = 'none'; return; }
+  dbgEl.innerHTML = debugHtml(dbgBall);
+  dbgEl.style.display = 'block';
+  dbgProj.set(pos[dbgBall * 3], pos[dbgBall * 3 + 1], pos[dbgBall * 3 + 2]);
+  simGroup.localToWorld(dbgProj);
+  dbgProj.project(camera);
+  const rect = renderer.domElement.getBoundingClientRect();
+  let x = (dbgProj.x * 0.5 + 0.5) * rect.width + rect.left + 16;
+  let y = (-dbgProj.y * 0.5 + 0.5) * rect.height + rect.top + 16;
+  x = Math.min(x, window.innerWidth - dbgEl.offsetWidth - 8);
+  y = Math.min(y, window.innerHeight - dbgEl.offsetHeight - 8);
+  dbgEl.style.left = Math.max(8, x) + 'px';
+  dbgEl.style.top = Math.max(8, y) + 'px';
+}
+
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
@@ -1523,6 +1628,7 @@ window.__dbg = {
   spawn(name) { spawnScenario(name); },
   get gpu() { return !!gpu; },
   tick() { return runPhysics(); },          // drive one physics+VM frame (used by tests)
+  inspect(i) { return debugHtml(i); },      // the debug tooltip's HTML for ball i
   kindCount(name) { let c = 0; const k = kindIndex.get(name); for (let i = 0; i < ballCount; i++) if (kindId[i] === k) c++; return c; },
   molecules() {
     for (let i = 0; i < ballCount; i++) uf[i] = i;
