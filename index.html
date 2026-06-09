@@ -1074,7 +1074,7 @@ function execInstr(self, l, ins, now) {
       // wire it, no swimming. Only by-kind binds acquire a ball from the soup and swim.
       if (ins.rhs.type !== 'kindFind') {
         const T = resolvePath(self, ins.rhs.segs);
-        if (T < 0) { logOnce(`${kindList[kindId[self]]}: bind ref resolved to nothing`); return 'next'; }
+        if (T < 0) { releaseBond(owner, ins.slot); return 'next'; }   // assigning a reference that resolves to nothing clears the slot
         setBond(owner, ins.slot, T); return 'next';
       }
       const wantKind = ins.rhs.kindId, subs = kindSubtypes[wantKind];   // the kind and all its descendants

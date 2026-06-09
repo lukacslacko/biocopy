@@ -126,6 +126,14 @@ ball Polymerase {
 ball bound in the `original` slot, `original.next` follows that ball's `next` slot,
 and a trailing `.kind`/`.state` reads (or, on the left, writes) that property.
 
+**Missing references.** If a path resolves to nothing (a slot along it is empty),
+the action degrades safely: a condition reading it is **false**; a `kind`/`state`
+write is a no-op; and an *assignment* of that reference **clears the slot** —
+`chain = next` when `next` is empty leaves `chain` unbound ("`= nothing` ⟹
+nothing"). This lets a walker fall off the end of a chain and stop cleanly: after
+the failed advance the slot is empty, so the next `if (slot.kind != End)` is false
+and the loop exits instead of spinning on a stale ball.
+
 ### Scenarios
 
 A scenario is an imperative builder, run once when you start it, with local variables:

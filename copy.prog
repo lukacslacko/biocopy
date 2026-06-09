@@ -177,8 +177,8 @@ ball Monomerase {
 
 scenario Test {
 	Blank * 3000;
-	Polymerase * 5;
-	Monomerase * 3;
+	Polymerase * 2;
+	Monomerase * 6;
 	chain = Cap;
 	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
 	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
