@@ -139,7 +139,7 @@ ball Polymerase {
 	};
 
 	0.001 {
-		drift 0.05s;
+		drift 0.1s;
 	}
 };
 
@@ -175,9 +175,9 @@ ball Monomerase {
 };
 
 scenario Test {
-	Blank * 1000;
-	Polymerase * 2;
-	Monomerase;
+	Blank * 3000;
+	Polymerase * 5;
+	Monomerase * 3;
 	chain = Cap;
 	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
 	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;

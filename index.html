@@ -173,7 +173,7 @@
 
   <div class="toggles">
     <label><input type="checkbox" id="showBonds" /> Bonds</label>
-    <label><input type="checkbox" id="retarget" checked /> Re-target stuck</label>
+    <label><input type="checkbox" id="retarget" /> Re-target stuck</label>
   </div>
 
   <div class="legend" id="legend">
@@ -226,8 +226,8 @@
       <input type="range" id="damp" min="0.5" max="0.99" step="0.01" value="0.9" />
     </div>
     <div class="field">
-      <div class="row"><label for="jiggle">Jiggle (thermal)</label><span class="val" id="jiggleVal">0.00</span></div>
-      <input type="range" id="jiggle" min="0" max="3" step="0.05" value="0" />
+      <div class="row"><label for="jiggle">Jiggle (thermal)</label><span class="val" id="jiggleVal">0.10</span></div>
+      <input type="range" id="jiggle" min="0" max="3" step="0.05" value="0.1" />
     </div>
     <div class="field">
       <div class="row"><label for="speed">Sim substeps / frame</label><span class="val" id="speedVal">4</span></div>
@@ -358,13 +358,13 @@ const cfg = {
   spring: 0.6,
   collide: 1.0,
   damp: 0.9,
-  jiggle: 0,            // thermal kick (off by default)
+  jiggle: 0.1,          // small thermal kick by default (keeps the soup mixing)
   substeps: 4,
   paused: false,
   showBonds: false,
   showContain: false,
   shadows: true,
-  retarget: true,       // re-target a `slot = Kind` swim that can't reach its target in time
+  retarget: false,      // re-target a `slot = Kind` swim that can't reach its target in time
 };
 
 // ---------------------------------------------------------------------------
