@@ -247,6 +247,9 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 
 // ===========================================================================
 // BioCopy — a soup of programmable monomers.
@@ -335,6 +338,8 @@ const MAX_LISTS = 6;              // parallel weighted action lists a kind may d
 
 // Behavior constants (will eventually be specified per-program, not in the UI).
 const SWIM_ACCEL = 0.60;          // steady seek thrust a ball applies toward a bind target
+const BOND_LINE_WIDTH = 3;        // bond line thickness in screen pixels (when bonds are shown)
+const BOND_VIEW_BALL_SCALE = 1 / 3;   // shrink balls to this fraction while bonds are shown
 
 const cfg = {
   radius: 1.0,          // render radius (cosmetic)
@@ -1118,7 +1123,8 @@ function recenter() {
 function syncInstances() {
   const n = ballCount;
   instMesh.count = n;
-  const s = cfg.radius;
+  // Shrink the balls while bonds are shown so the (thicker) bond lines are visible.
+  const s = cfg.radius * (cfg.showBonds ? BOND_VIEW_BALL_SCALE : 1);
   const m = instMesh.instanceMatrix.array;
   for (let i = 0; i < n; i++) {
     const o = i * 16, b = i * 3;
@@ -1136,27 +1142,38 @@ function syncInstances() {
   }
 }
 
+// Bonds are drawn as thick "fat lines" (LineSegments2), since WebGL ignores the
+// linewidth of ordinary lines. Width is in screen pixels (see BOND_LINE_WIDTH). The
+// segment buffer is allocated once at max capacity and updated in place each frame.
+const BOND_CAP = (MAX_BALLS * MAX_NBR) >> 1;   // upper bound on undirected bonds
 function rebuildBondLines() {
   if (bondLines) { simGroup.remove(bondLines); bondLines.geometry.dispose(); bondLines.material.dispose(); bondLines = null; }
   if (!cfg.showBonds) return;
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAX_BALLS * MAX_NBR * 3), 3));
-  bondLines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.3 }));
+  const geo = new LineSegmentsGeometry();
+  geo.setPositions(new Float32Array(BOND_CAP * 6));   // reserve capacity; draw count is limited below
+  geo.instanceCount = 0;
+  const mat = new LineMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, linewidth: BOND_LINE_WIDTH });
+  mat.resolution.set(window.innerWidth, window.innerHeight);
+  bondLines = new LineSegments2(geo, mat);
   bondLines.frustumCulled = false;
   simGroup.add(bondLines);
 }
 function syncBondLines() {
   if (!bondLines) return;
-  const arr = bondLines.geometry.attributes.position.array;
-  let s = 0;
+  const buf = bondLines.geometry.attributes.instanceStart.data;   // interleaved start+end, 6 floats/segment
+  const arr = buf.array;
+  let seg = 0;
   for (let i = 0; i < ballCount; i++) for (let k = 0; k < MAX_NBR; k++) {
     const j = nbr[i * MAX_NBR + k];
     if (j <= i) continue;                    // each undirected bond once
-    arr[s++] = pos[i*3]; arr[s++] = pos[i*3+1]; arr[s++] = pos[i*3+2];
-    arr[s++] = pos[j*3]; arr[s++] = pos[j*3+1]; arr[s++] = pos[j*3+2];
+    const o = seg * 6;
+    arr[o] = pos[i*3]; arr[o+1] = pos[i*3+1]; arr[o+2] = pos[i*3+2];
+    arr[o+3] = pos[j*3]; arr[o+4] = pos[j*3+1]; arr[o+5] = pos[j*3+2];
+    seg++;
   }
-  bondLines.geometry.setDrawRange(0, s / 3);
-  bondLines.geometry.attributes.position.needsUpdate = true;
+  bondLines.geometry.instanceCount = seg;
+  bondLines.visible = seg > 0;
+  if (seg > 0) buf.needsUpdate = true;
 }
 
 // Stats: total balls, molecules (connected components over nbr), bonds, per-kind counts.
@@ -1595,6 +1612,7 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  if (bondLines) bondLines.material.resolution.set(window.innerWidth, window.innerHeight);   // fat lines need pixel resolution
 });
 
 // ---------------------------------------------------------------------------
