@@ -427,6 +427,7 @@ const bindOwner = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);
 const bindSlot  = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);
 const bindTarget = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);
 const bindWantKind = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);  // kindFind binds lock onto this kind
+const bindFilter = new Array(MAX_BALLS * MAX_LISTS).fill(null);       // optional candidate predicate for a `slot = Kind[filter]` swim
 const drifting = new Uint8Array(MAX_BALLS * MAX_LISTS);   // 1 while this list's `drift` is running
 const swimSince = new Float64Array(MAX_BALLS * MAX_LISTS); // time the current swim began (for the stuck timeout)
 const findMiss = new Uint8Array(MAX_BALLS * MAX_LISTS);   // 1 while a `slot = Kind` keeps finding no candidate
@@ -483,6 +484,7 @@ function tokenize(src) {
     if (isIdStart(c)) { let j = i + 1; while (j < n && isIdChar(src[j])) j++; toks.push({ t: 'id', v: src.slice(i, j), pos: i }); i = j; continue; }
     if (isDigit(c)) { let j = i + 1; while (j < n && (isDigit(src[j]) || (src[j] === '.' && src[j + 1] !== '.'))) j++; toks.push({ t: 'num', v: src.slice(i, j), pos: i }); i = j; continue; }
     if ((c === '!' || c === '=') && src[i + 1] === '=') { toks.push({ t: 'op', v: c + '=', pos: i }); i += 2; continue; }
+    if ((c === '&' && src[i + 1] === '&') || (c === '|' && src[i + 1] === '|')) { toks.push({ t: 'op', v: c + c, pos: i }); i += 2; continue; }   // filter && / ||
     if (c === '.' && src[i + 1] === '.') { toks.push({ t: 'op', v: '..', pos: i }); i += 2; continue; }   // range, e.g. 1s..2s
     if ('{}()[];:=.|*!'.indexOf(c) >= 0) { toks.push({ t: 'op', v: c, pos: i }); i++; continue; }
     i++; // skip anything unexpected
@@ -654,9 +656,44 @@ function parseProgram(src, srcName) {
     function parseRhsForBind() {
       if (atA('release')) { q++; return { type: 'release' }; }
       const ids = parseDotted();
-      if (ids.length === 1 && isKind(ids[0]) && !isOwnSlot(ids[0])) return { type: 'kindFind', kindId: kindIndex.get(ids[0]) };
+      let filter = null;                                   // optional `[ … ]` predicate on each candidate
+      if (atA('[')) { q++; filter = parseFilter(); expectA(']'); }
+      const last = ids[ids.length - 1];
+      // by-kind find, kind given dynamically: `original.next.kind` → a ball whose kind matches that one
+      if (last === 'kind') return { type: 'kindFind', kindOf: segs(ids.slice(0, -1)), filter };
+      // by-kind find, literal kind name
+      if (ids.length === 1 && isKind(ids[0]) && !isOwnSlot(ids[0])) return { type: 'kindFind', kindId: kindIndex.get(ids[0]), filter };
+      if (filter) fail(`in ball '${def.name}': a [filter] only applies to a kind-find (a Kind name or a '.kind' path)`, cur());
       return { type: 'ref', segs: segs(ids) };
     }
+    // A candidate filter: a logical expression evaluated on each candidate ball. Bare
+    // identifiers are that ball's *slots* (`prev` → has a prev bond); supports `!`,
+    // `&&`, `||`, parens, and `.kind`/`.state` comparisons. Reuses the cond AST + evalCond.
+    function parseFilterTerm() {
+      if (atA('(')) { q++; const e = parseFilter(); expectA(')'); return e; }
+      if (atA('!')) { q++; return { type: 'not', cond: parseFilterTerm() }; }
+      const ids = parseDotted();
+      const last = ids[ids.length - 1];
+      if (atA('==') || atA('!=')) {
+        const op = nextA().v;
+        let a, dom;
+        if (last === 'kind') { a = { k: 'kindOf', segs: segs(ids.slice(0, -1)) }; dom = 'kind'; }
+        else if (last === 'state') { a = { k: 'stateOf', segs: segs(ids.slice(0, -1)) }; dom = 'state'; }
+        else fail(`in ball '${def.name}': filter comparison needs '.kind' or '.state' on the left`, cur());
+        const rids = parseDotted(); const rlast = rids[rids.length - 1];
+        let b;
+        if (rlast === 'kind') b = { k: 'kindOf', segs: segs(rids.slice(0, -1)) };
+        else if (rlast === 'state') b = { k: 'stateOf', segs: segs(rids.slice(0, -1)) };
+        else if (rids.length === 1 && dom === 'kind' && isKind(rids[0])) b = { k: 'kindLit', v: kindIndex.get(rids[0]) };
+        else if (rids.length === 1 && dom === 'state') b = { k: 'stateLit', v: getState(rids[0]) };
+        else fail(`in ball '${def.name}': invalid right-hand side in filter comparison`, cur());
+        return { type: 'cmp', op, a, b };
+      }
+      if (last === 'kind' || last === 'state') fail(`in ball '${def.name}': bare '.${last}' is not a test — compare it with == or !=`, cur());
+      return { type: 'present', a: { k: 'kindOf', segs: segs(ids) } };   // presence: the slot path resolves to a ball
+    }
+    function parseFilterAnd() { let e = parseFilterTerm(); while (atA('&&')) { q++; e = { type: 'and', a: e, b: parseFilterTerm() }; } return e; }
+    function parseFilter()    { let e = parseFilterAnd();  while (atA('||')) { q++; e = { type: 'or',  a: e, b: parseFilterAnd()  }; } return e; }
     function parseKindVal() {
       const ids = parseDotted();
       if (ids[ids.length - 1] === 'kind') return { type: 'kindOf', segs: segs(ids.slice(0, -1)) };
@@ -1034,10 +1071,10 @@ function findNearest(ex, ey, ez, pred) {
 // Nearest ball (to `center`) matching kind `want` (or a subkind), excluding `owner`, the
 // ball already in owner.slot, and `exclude`. Used to re-shuffle a stuck `slot = Kind` swim
 // to a *nearby* candidate it can actually reach in time (not one across the soup).
-function findNearbyKind(center, owner, slot, want, exclude) {
+function findNearbyKind(center, owner, slot, want, exclude, filter) {
   const subs = kindSubtypes[want];
   return findNearest(pos[center * 3], pos[center * 3 + 1], pos[center * 3 + 2],
-    i => i !== owner && i !== exclude && subs.has(kindId[i]) && bond[owner * MAX_SLOTS + slot] !== i);
+    i => i !== owner && i !== exclude && subs.has(kindId[i]) && bond[owner * MAX_SLOTS + slot] !== i && (!filter || evalCond(i, filter)));
 }
 // Throttled console note when a ball gives up on an unreachable by-kind target.
 function logStuck(self, want, oldT, ms) {
@@ -1058,6 +1095,8 @@ function evalOperand(self, o) {
 // resolves); `!` negates — e.g. `if (!original.next) …` fires when original/next is unbound.
 function evalCond(self, c) {
   if (c.type === 'not') return !evalCond(self, c.cond);
+  if (c.type === 'and') return evalCond(self, c.a) && evalCond(self, c.b);
+  if (c.type === 'or') return evalCond(self, c.a) || evalCond(self, c.b);
   if (c.type === 'present') return evalOperand(self, c.a) !== COND_ERR;
   const a = evalOperand(self, c.a), b = evalOperand(self, c.b);
   if (a === COND_ERR || b === COND_ERR) return false;
@@ -1135,15 +1174,22 @@ function execInstr(self, l, ins, now) {
         if (T < 0) { releaseBond(owner, ins.slot); return 'next'; }   // assigning a reference that resolves to nothing clears the slot
         setBond(owner, ins.slot, T); return 'next';
       }
-      const wantKind = ins.rhs.kindId, subs = kindSubtypes[wantKind];   // the kind and all its descendants
+      // The wanted kind: a literal, or read dynamically from a `.kind` path (e.g. `original.next.kind`).
+      let wantKind = ins.rhs.kindId;
+      if (wantKind == null) {
+        const kr = resolvePath(self, ins.rhs.kindOf);
+        if (kr < 0) { findMiss[idx] = 1; return 'retry'; }   // can't tell the kind yet — keep retrying
+        wantKind = kindId[kr];
+      }
+      const subs = kindSubtypes[wantKind], filter = ins.rhs.filter;   // kind (+ descendants) and the optional candidate predicate
       const T = findNearest(pos[self * 3], pos[self * 3 + 1], pos[self * 3 + 2],
-        i => i !== owner && subs.has(kindId[i]) && bond[owner * MAX_SLOTS + ins.slot] !== i);
-      if (T < 0) { findMiss[idx] = 1; return 'retry'; }   // none of that kind exists/free — keep retrying
+        i => i !== owner && subs.has(kindId[i]) && bond[owner * MAX_SLOTS + ins.slot] !== i && (!filter || evalCond(i, filter)));
+      if (T < 0) { findMiss[idx] = 1; return 'retry'; }   // none matching exists/free — keep retrying
       findMiss[idx] = 0;
       const bd = bindDist();
       if (dist2(owner, T) <= bd * bd) { setBond(owner, ins.slot, T); return 'next'; }
       // too far → swim there, bind on arrival
-      bindOwner[idx] = owner; bindSlot[idx] = ins.slot; bindTarget[idx] = T; bindWantKind[idx] = wantKind;
+      bindOwner[idx] = owner; bindSlot[idx] = ins.slot; bindTarget[idx] = T; bindWantKind[idx] = wantKind; bindFilter[idx] = filter || null;
       seekTarget[self] = T; swimSince[idx] = now; vmStatus[idx] = VM_SWIM; return 'block';
     }
     case 'if': return evalCond(self, ins.cond) ? execInstr(self, l, ins.inner, now) : 'next';
@@ -1154,10 +1200,11 @@ function execInstr(self, l, ins, now) {
 // Continue a swim in progress. Returns 'wait' | 'done' | 'abort'.
 function swimTick(self, l) {
   const idx = self * MAX_LISTS + l;
-  const owner = bindOwner[idx], want = bindWantKind[idx];
+  const owner = bindOwner[idx], want = bindWantKind[idx], filter = bindFilter[idx];
   const T = bindTarget[idx];
   let valid = T >= 0 && T < ballCount && owner >= 0 && owner < ballCount;
   if (valid && want >= 0 && !kindSubtypes[want].has(kindId[T])) valid = false;   // target changed to a non-matching kind
+  if (valid && filter && !evalCond(T, filter)) valid = false;                    // target no longer passes the filter
   if (!valid) { if (seekTarget[self] === T) seekTarget[self] = -1; bindTarget[idx] = -1; vmStatus[idx] = VM_RUN; return 'abort'; }
   seekTarget[self] = T;                                            // keep thrusting toward it
   const bd = bindDist();
@@ -1185,7 +1232,7 @@ function tickList(self, l, instrs, now) {
     if (cfg.retarget && bindWantKind[idx] >= 0 && now - swimSince[idx] > kindRetargetAfter[kindId[self]]) {
       const owner = bindOwner[idx], slot = bindSlot[idx], oldT = bindTarget[idx];
       logStuck(self, bindWantKind[idx], oldT, now - swimSince[idx]);
-      const nt = findNearbyKind(self, owner, slot, bindWantKind[idx], oldT);
+      const nt = findNearbyKind(self, owner, slot, bindWantKind[idx], oldT, bindFilter[idx]);
       if (nt >= 0) { bindTarget[idx] = nt; seekTarget[self] = nt; swimSince[idx] = now; }   // try the next-nearest one
       else { if (seekTarget[self] === oldT) seekTarget[self] = -1; bindTarget[idx] = -1; vmStatus[idx] = VM_RUN; }  // nothing else — re-find/retry
       return;
@@ -2058,8 +2105,10 @@ function debugHtml(b) {
     else if (cur < 0) tag = 'halted';
     // a `slot = Kind` that keeps finding nothing (e.g. that kind is used up)
     const ci = (cur >= 0 && cur < prog.instrs.length) ? prog.instrs[cur] : null;
-    if (st === VM_RUN && findMiss[idx] && ci && ci.op === 'bind' && ci.rhs.type === 'kindFind')
-      tag += ` · searching ${dbgEsc(kindList[ci.rhs.kindId])} — none available`;
+    if (st === VM_RUN && findMiss[idx] && ci && ci.op === 'bind' && ci.rhs.type === 'kindFind') {
+      const what = ci.rhs.kindId != null ? kindList[ci.rhs.kindId] : 'a matching kind';
+      tag += ` · searching ${dbgEsc(what)} — none available`;
+    }
     h += `<div class="lh">list ${l} · weight ${prog.weight} · ${tag}</div>`;
     for (let i = 0; i < prog.instrs.length; i++) {
       const lbls = prog.labels.get(i);

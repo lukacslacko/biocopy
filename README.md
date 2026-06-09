@@ -112,7 +112,7 @@ ball Polymerase {
 
 | Action | Meaning |
 | --- | --- |
-| `slot = Kind` | Find a nearby ball of `Kind`, swim to it, bind it into `slot`. |
+| `slot = Kind` | Find a nearby ball of `Kind`, swim to it, bind it into `slot`. The kind may be read dynamically from a ball with a `.kind` path (`material = original.next.kind` finds a ball of the same kind as `original.next`), and an optional `[filter]` restricts the candidates (see below). |
 | `slot = path` | Bind `slot` to a specific ball reached by a bond path (e.g. `original = original.next`) — wired directly, no swim. |
 | `owner.slot = …` | Same, but set a slot on another ball (`copy.next = material`) — wired directly. |
 | `slot = release` | Release whatever is bound in `slot`. |
@@ -126,6 +126,17 @@ ball Polymerase {
 **Paths** start at one of *this ball's* slots and follow bonds: `original` is the
 ball bound in the `original` slot, `original.next` follows that ball's `next` slot,
 and a trailing `.kind`/`.state` reads (or, on the left, writes) that property.
+
+**Candidate filters.** A kind-find can be narrowed with a `[…]` predicate that is
+evaluated *on each candidate ball*. Inside it, bare identifiers are the **candidate's
+own slots**, so a name is a presence test: `Cap[next]` finds a Cap that *has* a `next`
+bond, `Cap[!next]` one that doesn't, and `original.next.kind[!prev]` finds a free ball
+(no `prev`) of the kind `original.next` currently has — the workhorse of the
+`Polymerase`, which grabs unattached monomers of the right kind to extend a copy. The
+predicate is a full logical expression: `!`, `&&`, `||`, parentheses, and `.kind` /
+`.state` comparisons (`next.kind == End`, `prev` `&&` `!next`). The filter is also
+re-checked while swimming and when re-targeting, so a candidate that stops qualifying
+(e.g. another agent grabs its `prev`) is abandoned for a fresh one.
 
 **Missing references.** If a path resolves to nothing (a slot along it is empty),
 the action degrades safely: a condition reading it is **false**; a `kind`/`state`

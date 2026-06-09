@@ -116,25 +116,17 @@ ball Polymerase {
 	speed 1;
 
 	{
-		original = Cap;
-		material = Cap;
-		copy = material;
+		material = release;
+		original = Cap[next];
+		copy = Cap[!next];
 		
 		clone:
-		if (!original.next) go end;
-		original = original.next;
-		material = Blank;
-		material.kind = original.kind;
+		material = original.next.kind[!prev];
 		copy.next = material;
 		material.prev = copy;
 		copy = material;
-		go clone;
-
-		end:
-		original = release;
-		material = release;
-		if (copy.kind != End) copy.kind = End;
-		copy = release;
+		original = original.next;
+		if (original.next) go clone;					
 	};
 };
 
@@ -147,7 +139,7 @@ ball Monomerase {
 	retarget_after 5s;
 
 	{
-		sleep 1s;
+		sleep 5s;
 		if (!chain.next) chain = Cap;
 		next = chain.next;
 		replace chain with chain.kind;
@@ -156,9 +148,13 @@ ball Monomerase {
 };
 
 scenario Test {
-	Blank * 3000;
-	Polymerase * 2;
-	Monomerase * 6;
+	Cap * 2;
+	End * 2;
+	Info_1 * 100;
+	Info_2 * 100;
+	Info_3 * 100;
+	Polymerase;
+	Monomerase;
 	chain = Cap;
 	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
 	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
