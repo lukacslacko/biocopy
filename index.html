@@ -157,6 +157,11 @@
   <p class="sub">Programmable monomers — each ball runs a little program that binds, builds, and copies.</p>
 
   <div class="field">
+    <div class="row"><label for="progFile">Program</label></div>
+    <select id="progFile"></select>
+  </div>
+
+  <div class="field">
     <div class="row"><label for="scenario">Scenario</label></div>
     <select id="scenario"></select>
   </div>
@@ -165,6 +170,10 @@
     <button id="run">Run scenario</button>
     <button id="reload" class="secondary">Reload program</button>
   </div>
+  <div class="buttons">
+    <button id="addProg" class="secondary">Add .prog file…</button>
+  </div>
+  <input id="progFileInput" type="file" accept=".prog" multiple style="display:none" />
 
   <div class="buttons">
     <button id="pause" class="secondary">Pause</button>
@@ -1671,15 +1680,69 @@ function animate() {
 // ---------------------------------------------------------------------------
 // Program loading
 // ---------------------------------------------------------------------------
-async function loadProgram() {
-  let src = null, srcName = 'copy.prog';
+// Known program files, name -> source descriptor:
+//   { kind:'url' }  → fetched by name each load (so editing the file + Reload picks up changes)
+//   { kind:'text', text } → an in-memory snapshot (a file picked from disk on file://, no live reload)
+const progFiles = new Map([['copy.prog', { kind: 'url' }], ['copy_fine.prog', { kind: 'url' }]]);
+let currentProgFile = 'copy.prog';
+
+// Best-effort directory listing: works on servers that auto-index (nginx, `python -m
+// http.server` of a folder with no index.html). When index.html shadows the listing
+// it simply finds no .prog links — harmless; the file picker covers that case.
+async function discoverPrograms() {
   try {
-    const r = await fetch('copy.prog', { cache: 'no-store' });
-    if (r.ok) src = await r.text();
-  } catch (_) { /* file:// or missing — fall back below */ }
-  if (src == null) { console.warn('Could not fetch copy.prog; using the embedded default program.'); src = DEFAULT_PROG; srcName = '(embedded default)'; }
+    const r = await fetch('./', { cache: 'no-store' });
+    if (!r.ok) return;
+    const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+    for (const a of doc.querySelectorAll('a[href]')) {
+      const m = (a.getAttribute('href') || '').match(/([^\/?#]+\.prog)(?:[?#]|$)/);
+      if (m) { const fn = decodeURIComponent(m[1]); if (!progFiles.has(fn)) progFiles.set(fn, { kind: 'url' }); }
+    }
+  } catch (_) { /* file:// or no listing — rely on the default + the file picker */ }
+}
+
+// Remember the by-name (url) programs across reloads, so files added via the picker
+// stay in the dropdown (handy when the server doesn't expose a directory listing).
+function saveProgFiles() {
   try {
-    parseProgram(src, srcName);
+    const names = [...progFiles].filter(([, d]) => d.kind === 'url').map(([n]) => n);
+    localStorage.setItem('biocopy.progFiles', JSON.stringify(names));
+  } catch (_) { /* no localStorage — fine */ }
+}
+function restoreProgFiles() {
+  try {
+    for (const n of JSON.parse(localStorage.getItem('biocopy.progFiles') || '[]'))
+      if (typeof n === 'string' && !progFiles.has(n)) progFiles.set(n, { kind: 'url' });
+  } catch (_) { /* no localStorage — fine */ }
+}
+
+function populatePrograms() {
+  const sel = document.getElementById('progFile');
+  if (!sel) return;
+  sel.innerHTML = '';
+  for (const name of progFiles.keys()) {
+    const opt = document.createElement('option'); opt.value = name; opt.textContent = name; sel.appendChild(opt);
+  }
+  sel.value = progFiles.has(currentProgFile) ? currentProgFile : (sel.options[0] ? sel.options[0].value : '');
+}
+
+async function loadProgram(name) {
+  name = name || currentProgFile;
+  const desc = progFiles.get(name) || { kind: 'url' };
+  let src = null;
+  if (desc.kind === 'text') src = desc.text;
+  else { try { const r = await fetch(name, { cache: 'no-store' }); if (r.ok) src = await r.text(); } catch (_) { /* fall through */ } }
+  if (src == null) {
+    if (name === 'copy.prog') { console.warn('Could not fetch copy.prog; using the embedded default program.'); src = DEFAULT_PROG; }
+    else {
+      console.error('Could not load program: ' + name);
+      document.getElementById('legend').innerHTML =
+        `<div class="note" style="color:var(--accent-2)">Could not load ${name.replace(/</g, '&lt;')}</div>`;
+      return false;
+    }
+  }
+  try {
+    parseProgram(src, name);
   } catch (e) {
     console.error('Program parse error:\n' + e.message);   // multi-line: location + caret
     const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
@@ -1688,11 +1751,19 @@ async function loadProgram() {
       '<pre style="white-space:pre-wrap; font-size:11px; margin:6px 0 0; color:var(--ink-dim)">' + esc(e.message) + '</pre>';
     return false;
   }
+  currentProgFile = name;
   buildLegend();
   populateScenarios();
   if (gpu) gpu.uploadKindTables();        // per-kind speed + repel matrix
-  console.log(`Parsed ${kindList.length} kinds, ${scenarios.size} scenarios:`, [...scenarios.keys()]);
+  console.log(`Loaded ${name}: ${kindList.length} kinds, ${scenarios.size} scenarios:`, [...scenarios.keys()]);
   return true;
+}
+
+// Switch to a program and spawn its first scenario (mirrors boot).
+async function selectProgram(name) {
+  if (!(await loadProgram(name))) return;
+  const s = document.getElementById('scenario');
+  if (s.value) spawnScenario(s.value);
 }
 function populateScenarios() {
   const sel = document.getElementById('scenario');
@@ -1737,6 +1808,28 @@ document.getElementById('scenario').addEventListener('change', e => { if (e.targ
 document.getElementById('reload').addEventListener('click', async () => {
   const ok = await loadProgram();
   if (ok) { const name = document.getElementById('scenario').value; if (name) spawnScenario(name); }
+});
+document.getElementById('progFile').addEventListener('change', e => { if (e.target.value) selectProgram(e.target.value); });
+
+// "Add .prog file…": pick file(s) from disk. We register them by name and prefer
+// fetching by name (so Reload picks up later edits); if that fails (file:// or the
+// file isn't under the served root) we keep the picked contents as a snapshot.
+const progFileInput = document.getElementById('progFileInput');
+document.getElementById('addProg').addEventListener('click', () => progFileInput.click());
+progFileInput.addEventListener('change', async e => {
+  const files = [...e.target.files];
+  let last = null;
+  for (const f of files) {
+    let desc = null;
+    try { const r = await fetch(f.name, { cache: 'no-store' }); if (r.ok) desc = { kind: 'url' }; } catch (_) { /* not served */ }
+    if (!desc) desc = { kind: 'text', text: await f.text() };
+    progFiles.set(f.name, desc);
+    last = f.name;
+  }
+  e.target.value = '';                 // let the same file be re-picked later
+  saveProgFiles();
+  populatePrograms();
+  if (last) { document.getElementById('progFile').value = last; await selectProgram(last); }
 });
 
 const pauseBtn = document.getElementById('pause');
@@ -1962,7 +2055,12 @@ window.addEventListener('resize', () => {
   gpu = await createGPUEngine();
   const modeEl = document.getElementById('mode');
   if (modeEl) modeEl.textContent = gpu ? 'GPU' : 'CPU';
-  await loadProgram();
+  restoreProgFiles();                   // files added in a previous session
+  await discoverPrograms();             // plus anything the server lists
+  saveProgFiles();
+  populatePrograms();
+  await loadProgram(document.getElementById('progFile').value || 'copy.prog');
+  populatePrograms();                   // a discovered/default program may now be current
   const sel = document.getElementById('scenario');
   if (sel.value) spawnScenario(sel.value);
   lastT = performance.now();
@@ -1982,6 +2080,8 @@ window.__dbg = {
   get kindList() { return kindList; },
   get slotNames() { return slotNames; },
   scenarios() { return [...scenarios.keys()]; },
+  programFiles() { return [...progFiles.keys()]; },
+  selectProgram(name) { return selectProgram(name); },
   spawn(name) { spawnScenario(name); },
   get gpu() { return !!gpu; },
   tick() { return runPhysics(); },          // drive one physics+VM frame (used by tests)

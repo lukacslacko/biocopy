@@ -174,9 +174,11 @@ The panel loads `copy.prog`, lists its scenarios, and shows live stats:
 
 | Control | Effect |
 | --- | --- |
+| **Program** | Pick which `.prog` file to run; selecting one parses it and spawns its first scenario. The list always includes `copy.prog`; any other `.prog` files in the directory appear automatically if your server returns a directory listing (see below), and you can add more with **Add .prog file…**. |
+| **Add .prog file…** | Open a file picker to choose `.prog` file(s) from disk and add them to the **Program** list. If the chosen file lives in the served directory it's loaded by name (so editing it and clicking **Reload** picks up changes); otherwise its contents are used as a one-time snapshot. |
 | **Scenario** | Pick a scenario from the loaded program; selecting one (re)spawns it. |
 | **Run scenario** | Respawn the selected scenario. |
-| **Reload program** | Re-fetch and re-parse `copy.prog` (edit the file, click Reload). |
+| **Reload program** | Re-fetch and re-parse the currently selected program (edit the file, click Reload). |
 | **Legend** | One row per kind with its color and a live ball count. |
 | **Render radius** | Drawn ball size only — cosmetic. |
 | **Interact radius** | Drives the sim: collision distance is `2 · interact`. |
@@ -209,6 +211,13 @@ Any static server works (`npx serve`, etc.). A WebGPU-capable browser is recomme
 for large scenarios — the physics then runs on the GPU. (Opening the file directly
 over `file://` also works: `fetch` is blocked there, so it falls back to an embedded
 copy of the program.)
+
+**Auto-listing `.prog` files.** The **Program** dropdown auto-discovers `.prog` files
+by reading the server's directory listing. `python3 -m http.server` serves
+`index.html` for the root instead of a listing, so the dropdown starts with just
+`copy.prog` — use **Add .prog file…** to pick the others (they then load by name with
+working live-reload). Servers that return an autoindex (or serving the `.prog` files
+from a subdirectory without an `index.html`) populate the dropdown automatically.
 
 ## Implementation notes
 
