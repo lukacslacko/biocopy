@@ -336,6 +336,7 @@ const MAX_BALLS = 40000;          // headroom for the GPU path (CPU stays well b
 const MAX_SLOTS = 8;              // distinct named bond slots a program may use
 const MAX_NBR   = 8;              // physics adjacency width (bonds per ball)
 const MAX_LISTS = 6;              // parallel weighted action lists a kind may define
+const MAX_KINDS = 64;             // capacity for the per-kind speed table & repel matrix
 
 // Behavior constants (will eventually be specified per-program, not in the UI).
 const SWIM_ACCEL = 0.60;          // steady seek thrust a ball applies toward a bind target
@@ -425,6 +426,10 @@ let stateIndex = new Map();       // state name -> id
 let stateNames = [];              // state id -> name
 let scenarios = new Map();        // name -> [scenario stmt]
 let kindSubtypes = [];            // kindId -> Set of that kind's id + all descendants' ids
+let kindSpeed = new Float32Array(MAX_KINDS).fill(1);   // kindId -> swim/drift thrust multiplier
+let repelMatrix = new Float32Array(MAX_KINDS * MAX_KINDS);   // [a*MAX_KINDS+b] = min separation a keeps from b
+let maxRepelDist = 0;             // largest repel distance (sizes the physics grid cell)
+let kindDirtyForGPU = false;      // kindId changed → re-upload before next GPU step
 
 // Render meshes
 const ballGeo = new THREE.SphereGeometry(1, 18, 14);
@@ -501,17 +506,24 @@ function parseProgram(src, srcName) {
     expect('}');
     return inner;
   }
+  const expectNum = () => { if (!toks[p] || toks[p].t !== 'num') fail(`expected a number but got '${toks[p].v}'`, toks[p]); return parseFloat(toks[p++].v); };
   function parseBallRaw() {
     const name = expectId();
     let parent = null;
     if (at(':')) { p++; parent = expectId(); }
     expect('{');
-    const slotDecls = []; const actionLists = [];   // each: { weight, toks }
+    const slotDecls = [], actionLists = [], repels = [];   // actionLists: { weight, toks }; repels: { kind, dist }
+    let speed = null;
     while (!at('}')) {
       if (at('{')) { actionLists.push({ weight: 1.0, toks: captureBraced() }); if (at(';')) p++; }
       else if (toks[p] && toks[p].t === 'num' && toks[p + 1] && toks[p + 1].v === '{') {
         const w = parseFloat(toks[p++].v);          // weighted action list:  <weight> { … }
         actionLists.push({ weight: w, toks: captureBraced() }); if (at(';')) p++;
+      } else if (at('speed')) {                       // speed <multiplier>;
+        p++; speed = expectNum(); expect(';');
+      } else if (at('repel')) {                       // repel <Kind> <distance>;
+        p++; const kind = expectId(); const dist = expectNum(); expect(';');
+        repels.push({ kind, dist });
       } else {
         if (at('bond')) p++;            // optional 'bond' keyword
         const sName = expectId(); expect(':');
@@ -523,7 +535,7 @@ function parseProgram(src, srcName) {
     }
     expect('}');
     if (at(';')) p++;
-    return { name, parent, slotDecls, actionLists };
+    return { name, parent, slotDecls, actionLists, speed, repels };
   }
   function parseScenRaw() {
     const name = expectId();
@@ -576,6 +588,19 @@ function parseProgram(src, srcName) {
     if (!b) return [];
     if (b.actionLists.length) return b.actionLists;
     return b.parent ? inheritedActionLists(b.parent) : [];
+  }
+  function mergedSpeed(name) {   // own speed, else inherited, else default 1
+    const b = rawByName.get(name);
+    if (!b) return 1;
+    if (b.speed != null) return b.speed;
+    return b.parent ? mergedSpeed(b.parent) : 1;
+  }
+  function mergedRepels(name, seen) {   // parent's repels + own
+    seen = seen || new Set();
+    const b = rawByName.get(name);
+    if (!b || seen.has(name)) return [];
+    seen.add(name);
+    return (b.parent ? mergedRepels(b.parent, seen) : []).concat(b.repels);
   }
 
   // Compile a kind's action block into an instruction list.
@@ -746,6 +771,23 @@ function parseProgram(src, srcName) {
       const d = kinds.get(name); name = d ? d.parent : null;
     }
   }
+
+  // Per-kind properties: speed (swim/drift thrust multiplier) and repel rules.
+  // repelMatrix[a*MAX_KINDS + b] = min separation a wants to keep from b (0 = none),
+  // expanded to subkinds of the repelled kind. maxRepelDist sizes the physics grid.
+  kindSpeed = new Float32Array(MAX_KINDS).fill(1);
+  repelMatrix = new Float32Array(MAX_KINDS * MAX_KINDS);
+  maxRepelDist = 0;
+  for (let k = 0; k < kindList.length; k++) {
+    kindSpeed[k] = mergedSpeed(kindList[k]);
+    for (const r of mergedRepels(kindList[k])) {
+      if (!kindIndex.has(r.kind)) { console.warn(`[program] repel: unknown kind '${r.kind}'`); continue; }
+      for (const b of kindSubtypes[kindIndex.get(r.kind)]) {
+        repelMatrix[k * MAX_KINDS + b] = Math.max(repelMatrix[k * MAX_KINDS + b], r.dist);
+      }
+      maxRepelDist = Math.max(maxRepelDist, r.dist);
+    }
+  }
   for (const b of ballsRaw) {
     const def = kinds.get(b.name);
     const lists = inheritedActionLists(b.name);
@@ -806,7 +848,7 @@ function releaseBond(owner, slot) {
 }
 function setKind(i, kid) {
   if (kindId[i] === kid) return;
-  kindId[i] = kid; colorsDirty = true; statsDirty = true; actionHappened = true;
+  kindId[i] = kid; colorsDirty = true; statsDirty = true; actionHappened = true; kindDirtyForGPU = true;
   const def = kinds.get(kindList[kid]);
   if (def && def.programs.length) { if (!inActive[i]) initVM(i); }
   else if (inActive[i]) haltVM(i);
@@ -905,7 +947,7 @@ function spawnScenario(name) {
   colorsDirty = true; statsDirty = true; gpuBondsDirty = true;
   rebuildBondLines();
   refreshCounts();
-  if (gpu) { gpu.uploadAll(ballCount); gpuBondsDirty = false; }
+  if (gpu) { gpu.uploadAll(ballCount); gpuBondsDirty = false; kindDirtyForGPU = false; }
 }
 
 // ---------------------------------------------------------------------------
@@ -958,8 +1000,8 @@ function execInstr(self, l, ins, now) {
     case 'go': pc[idx] = ins.to; return 'jump';
     case 'sleep': vmStatus[idx] = VM_SLEEP; vmSleepUntil[idx] = now + rollMs(ins); return 'next';
     case 'drift': {                              // like sleep, but drift in a random direction
-      const d = randomUnit();
-      driftDir[self * 3] = d.x * SWIM_ACCEL; driftDir[self * 3 + 1] = d.y * SWIM_ACCEL; driftDir[self * 3 + 2] = d.z * SWIM_ACCEL;
+      const d = randomUnit(), a = SWIM_ACCEL * kindSpeed[kindId[self]];
+      driftDir[self * 3] = d.x * a; driftDir[self * 3 + 1] = d.y * a; driftDir[self * 3 + 2] = d.z * a;
       driftDirty = true; drifting[idx] = 1;
       vmStatus[idx] = VM_SLEEP; vmSleepUntil[idx] = now + rollMs(ins); return 'next';
     }
@@ -1086,7 +1128,7 @@ function isBonded(i, j) { for (let k = 0; k < MAX_NBR; k++) if (nbr[i * MAX_NBR 
 function step(dt) {
   const n = ballCount;
   const k_spring = cfg.spring, k_col = cfg.collide, r = cfg.interact;
-  const L0 = cfg.bondLen * r, minDist = 2 * r, cell = minDist;
+  const L0 = cfg.bondLen * r, minDist = 2 * r, cell = Math.max(minDist, maxRepelDist);
   force.fill(0, 0, n * 3);
 
   // Springs along undirected bonds (each ball handles its own incident bonds).
@@ -1118,12 +1160,22 @@ function step(dt) {
         if (j <= i) continue;
         const dx = pos[j * 3] - pos[i * 3], dy = pos[j * 3 + 1] - pos[i * 3 + 1], dz = pos[j * 3 + 2] - pos[i * 3 + 2];
         const d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 < 1e-12 || d2 >= minDist * minDist) continue;
-        if (isBonded(i, j)) continue;
-        const dist = Math.sqrt(d2), inv = 1 / dist, overlap = minDist - dist;
-        const fx = -k_col * overlap * dx * inv, fy = -k_col * overlap * dy * inv, fz = -k_col * overlap * dz * inv;
-        force[i * 3] += fx; force[i * 3 + 1] += fy; force[i * 3 + 2] += fz;
-        force[j * 3] -= fx; force[j * 3 + 1] -= fy; force[j * 3 + 2] -= fz;
+        if (d2 < 1e-12) continue;
+        // Collision: push apart non-bonded balls within 2·r.
+        if (d2 < minDist * minDist && !isBonded(i, j)) {
+          const dist = Math.sqrt(d2), inv = 1 / dist, overlap = minDist - dist, s = k_col * overlap * inv;
+          force[i * 3] -= s * dx; force[i * 3 + 1] -= s * dy; force[i * 3 + 2] -= s * dz;
+          force[j * 3] += s * dx; force[j * 3 + 1] += s * dy; force[j * 3 + 2] += s * dz;
+        }
+        // Repel: kind-based minimum separation (a ball of kind A keeps `rd` from kind B).
+        if (maxRepelDist > 0) {
+          const rd = Math.max(repelMatrix[kindId[i] * MAX_KINDS + kindId[j]], repelMatrix[kindId[j] * MAX_KINDS + kindId[i]]);
+          if (rd > 0 && d2 < rd * rd) {
+            const dist = Math.sqrt(d2), inv = 1 / dist, overlap = rd - dist, s = k_col * overlap * inv;
+            force[i * 3] -= s * dx; force[i * 3 + 1] -= s * dy; force[i * 3 + 2] -= s * dz;
+            force[j * 3] += s * dx; force[j * 3 + 1] += s * dy; force[j * 3 + 2] += s * dz;
+          }
+        }
       }
     }
   }
@@ -1134,7 +1186,7 @@ function step(dt) {
     if (t >= 0 && t < n) {
       const dx = pos[t * 3] - pos[o], dy = pos[t * 3 + 1] - pos[o + 1], dz = pos[t * 3 + 2] - pos[o + 2];
       const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (d > 1e-6) { const s = SWIM_ACCEL / d; force[o] += s * dx; force[o + 1] += s * dy; force[o + 2] += s * dz; }
+      if (d > 1e-6) { const s = SWIM_ACCEL * kindSpeed[kindId[i]] / d; force[o] += s * dx; force[o + 1] += s * dy; force[o + 2] += s * dz; }
     }
     force[o] += driftDir[o]; force[o + 1] += driftDir[o + 1]; force[o + 2] += driftDir[o + 2];
   }
@@ -1273,12 +1325,13 @@ const GPU_RECENTER_INTERVAL = 30;
 let gpu = null, gpuTick = 0;
 
 const PHYS_WGSL = /* wgsl */`
+const MK: u32 = ${MAX_KINDS}u;   // repel-matrix stride
 struct Params {
   n: u32, gridDim: u32, maxNbr: u32, frameSeed: u32,
   dt: f32, kSpring: f32, kCol: f32, interact: f32,
   minDist: f32, jiggle: f32, damp: f32, restLen: f32,
   cellSize: f32, worldMin: f32, cellCap: u32, containR: f32,
-  containK: f32, swimAccel: f32, pad0: f32, pad1: f32,
+  containK: f32, swimAccel: f32, nKinds: u32, maxRepelDist: f32,
 };
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read_write> pos: array<f32>;
@@ -1289,8 +1342,12 @@ struct Params {
 @group(0) @binding(6) var<storage, read> nbrb: array<i32>;
 @group(0) @binding(7) var<storage, read> seekb: array<i32>;
 @group(0) @binding(8) var<storage, read> driftb: array<f32>;
+@group(0) @binding(9) var<storage, read> kindb: array<u32>;
+@group(0) @binding(10) var<storage, read> kindTbl: array<f32>;   // [speed: MK][repel: MK*MK]
 
 fn pv(i: u32) -> vec3<f32> { return vec3<f32>(pos[3u*i], pos[3u*i+1u], pos[3u*i+2u]); }
+fn kindSpeedOf(k: u32) -> f32 { return kindTbl[k]; }
+fn repelDist(a: u32, b: u32) -> f32 { return max(kindTbl[MK + a*MK + b], kindTbl[MK + b*MK + a]); }
 fn springForce(d: vec3<f32>) -> vec3<f32> { let l = length(d); if (l < 1e-6) { return vec3<f32>(0.0); } return (P.kSpring * (l - P.restLen) / l) * d; }
 fn axis(v: f32) -> i32 { return clamp(i32(floor((v - P.worldMin) / P.cellSize)), 0, i32(P.gridDim) - 1); }
 fn hash1(s: u32) -> f32 { var x = s * 747796405u + 2891336453u; x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u; x = (x >> 22u) ^ x; return f32(x) / 4294967296.0; }
@@ -1309,7 +1366,7 @@ fn isNbr(i: u32, j: u32) -> bool { for (var s = 0u; s < P.maxNbr; s = s + 1u) { 
 }
 @compute @workgroup_size(64) fn computeForces(@builtin(global_invocation_id) g: vec3<u32>) {
   let i = g.x; let n = P.n; if (i >= n) { return; }
-  let pi = pv(i); var f = vec3<f32>(0.0);
+  let pi = pv(i); var f = vec3<f32>(0.0); let ki = kindb[i];
   for (var s = 0u; s < P.maxNbr; s = s + 1u) { let b = nbrb[i*P.maxNbr+s]; if (b >= 0) { f += springForce(pv(u32(b)) - pi); } }
   let cx = axis(pi.x); let cy = axis(pi.y); let cz = axis(pi.z); let gd = i32(P.gridDim); let md2 = P.minDist * P.minDist;
   for (var oz = -1; oz <= 1; oz++) { let zz = clamp(cz + oz, 0, gd - 1);
@@ -1321,10 +1378,15 @@ fn isNbr(i: u32, j: u32) -> bool { for (var s = 0u; s < P.maxNbr; s = s + 1u) { 
           let j = cellItems[cid * P.cellCap + s];
           if (j == i) { continue; }
           let diff = pv(j) - pi; let d2 = dot(diff, diff);
-          if (d2 < 1e-12 || d2 >= md2) { continue; }
-          if (isNbr(i, j)) { continue; }
+          if (d2 < 1e-12) { continue; }
           let dist = sqrt(d2);
-          f += (P.kCol * (P.minDist - dist) / dist) * (-diff);
+          if (d2 < md2 && !isNbr(i, j)) {                       // collision
+            f += (P.kCol * (P.minDist - dist) / dist) * (-diff);
+          }
+          if (P.maxRepelDist > 0.0) {                           // kind-based repel (min separation)
+            let rd = repelDist(ki, kindb[j]);
+            if (rd > 0.0 && dist < rd) { f += (P.kCol * (rd - dist) / dist) * (-diff); }
+          }
         }
       }
     }
@@ -1334,8 +1396,8 @@ fn isNbr(i: u32, j: u32) -> bool { for (var s = 0u; s < P.maxNbr; s = s + 1u) { 
     f += r * P.jiggle;
   }
   let st = seekb[i];
-  if (st >= 0) { let d = pv(u32(st)) - pi; let l = length(d); if (l > 1e-6) { f += (P.swimAccel / l) * d; } }
-  f += vec3<f32>(driftb[3u*i], driftb[3u*i+1u], driftb[3u*i+2u]);   // steady drift force (0 when not drifting)
+  if (st >= 0) { let d = pv(u32(st)) - pi; let l = length(d); if (l > 1e-6) { f += (P.swimAccel * kindSpeedOf(ki) / l) * d; } }
+  f += vec3<f32>(driftb[3u*i], driftb[3u*i+1u], driftb[3u*i+2u]);   // steady drift force (already scaled by speed)
   if (P.containK > 0.0) { let d = length(pi); if (d > P.containR) { f += (-P.containK * (d - P.containR) / d) * pi; } }
   force[3u*i] = f.x; force[3u*i+1u] = f.y; force[3u*i+2u] = f.z;
 }
@@ -1351,12 +1413,19 @@ fn isNbr(i: u32, j: u32) -> bool { for (var s = 0u; s < P.maxNbr; s = s + 1u) { 
   vel[b]=v.x; vel[b+1u]=v.y; vel[b+2u]=v.z;
 }`;
 
+const GPU_STORAGE_BUFFERS = 10;   // pos,vel,force,cellCount,cellItems,nbr,seek,drift,kind,kindTbl(speed+repel)
 async function createGPUEngine() {
   if (!('gpu' in navigator)) return null;
   try {
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) return null;
-    const device = await adapter.requestDevice();
+    // The default maxStorageBuffersPerShaderStage is 8; our compute pass needs more.
+    const have = adapter.limits.maxStorageBuffersPerShaderStage || 8;
+    if (have < GPU_STORAGE_BUFFERS) {
+      console.warn(`WebGPU: adapter allows ${have} storage buffers/stage (need ${GPU_STORAGE_BUFFERS}) — using CPU physics.`);
+      return null;
+    }
+    const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: GPU_STORAGE_BUFFERS } });
     device.addEventListener && device.addEventListener('uncapturederror', ev => console.error('WebGPU error:', ev.error && ev.error.message));
 
     const numCells = GRID_CAP * GRID_CAP * GRID_CAP;
@@ -1372,6 +1441,8 @@ async function createGPUEngine() {
     const nbrBuf       = mk(MAX_BALLS * MAX_NBR * 4, U.STORAGE | U.COPY_DST);
     const seekBuf      = mk(MAX_BALLS * 4, U.STORAGE | U.COPY_DST);
     const driftBuf     = mk(fbytes, U.STORAGE | U.COPY_DST);
+    const kindBuf      = mk(MAX_BALLS * 4, U.STORAGE | U.COPY_DST);
+    const kindTblBuf   = mk((MAX_KINDS + MAX_KINDS * MAX_KINDS) * 4, U.STORAGE | U.COPY_DST);   // speed table + repel matrix
     const posStaging   = mk(fbytes, U.MAP_READ | U.COPY_DST);
 
     const module = device.createShaderModule({ code: PHYS_WGSL });
@@ -1379,7 +1450,7 @@ async function createGPUEngine() {
       const info = await module.getCompilationInfo();
       for (const m of info.messages) if (m.type === 'error') console.error('WGSL', m.lineNum + ':' + m.linePos, m.message);
     }
-    const bgl = device.createBindGroupLayout({ entries: [0,1,2,3,4,5,6,7,8].map(binding => ({
+    const bgl = device.createBindGroupLayout({ entries: [0,1,2,3,4,5,6,7,8,9,10].map(binding => ({
       binding, visibility: GPUShaderStage.COMPUTE,
       buffer: { type: binding === 0 ? 'uniform' : (binding >= 6 ? 'read-only-storage' : 'storage') },
     })) });
@@ -1387,7 +1458,7 @@ async function createGPUEngine() {
     const pipe = ep => device.createComputePipeline({ layout: pl, compute: { module, entryPoint: ep } });
     const pipes = { clear: pipe('clearGrid'), build: pipe('buildGrid'), forces: pipe('computeForces'), integrate: pipe('integrate') };
     const bind = device.createBindGroup({ layout: bgl,
-      entries: [paramsBuf, posBuf, velBuf, forceBuf, cellCountBuf, cellItemsBuf, nbrBuf, seekBuf, driftBuf].map((buffer, binding) => ({ binding, resource: { buffer } })) });
+      entries: [paramsBuf, posBuf, velBuf, forceBuf, cellCountBuf, cellItemsBuf, nbrBuf, seekBuf, driftBuf, kindBuf, kindTblBuf].map((buffer, binding) => ({ binding, resource: { buffer } })) });
 
     const pbuf = new ArrayBuffer(96);
     const pu = new Uint32Array(pbuf), pf = new Float32Array(pbuf);
@@ -1396,14 +1467,14 @@ async function createGPUEngine() {
 
     function writeParams(n, seed) {
       const r = cfg.interact, minDist = 2 * r;
-      let cellSize = minDist;
+      let cellSize = Math.max(minDist, maxRepelDist);   // grid must catch the longest repel range
       let gridDim = Math.ceil(WORLD_SIZE / cellSize);
       if (gridDim > GRID_CAP) { gridDim = GRID_CAP; cellSize = WORLD_SIZE / gridDim; }
       pu[0] = n; pu[1] = gridDim; pu[2] = MAX_NBR; pu[3] = seed >>> 0;
       pf[4] = 0.18; pf[5] = cfg.spring; pf[6] = cfg.collide; pf[7] = r;
       pf[8] = minDist; pf[9] = cfg.jiggle; pf[10] = cfg.damp; pf[11] = cfg.bondLen * r;
       pf[12] = cellSize; pf[13] = WORLD_MIN; pu[14] = CELL_CAP; pf[15] = cfg.containR;
-      pf[16] = cfg.containK; pf[17] = SWIM_ACCEL; pf[18] = 0; pf[19] = 0;
+      pf[16] = cfg.containK; pf[17] = SWIM_ACCEL; pu[18] = kindList.length; pf[19] = maxRepelDist;
       device.queue.writeBuffer(paramsBuf, 0, pbuf);
     }
     function stepGPU(n, substeps) {
@@ -1436,10 +1507,16 @@ async function createGPUEngine() {
         device.queue.writeBuffer(nbrBuf, 0, nbr, 0, n * MAX_NBR);
         device.queue.writeBuffer(seekBuf, 0, seekTarget, 0, n);
         device.queue.writeBuffer(driftBuf, 0, driftDir, 0, n * 3);
+        device.queue.writeBuffer(kindBuf, 0, kindId, 0, n);
       },
       uploadBonds(n) { device.queue.writeBuffer(nbrBuf, 0, nbr, 0, n * MAX_NBR); },
       uploadSeek(n) { device.queue.writeBuffer(seekBuf, 0, seekTarget, 0, n); },
       uploadDrift(n) { device.queue.writeBuffer(driftBuf, 0, driftDir, 0, n * 3); },
+      uploadKinds(n) { device.queue.writeBuffer(kindBuf, 0, kindId, 0, n); },
+      uploadKindTables() {   // speed table then repel matrix, in one buffer (changes only on parse)
+        device.queue.writeBuffer(kindTblBuf, 0, kindSpeed, 0, MAX_KINDS);
+        device.queue.writeBuffer(kindTblBuf, MAX_KINDS * 4, repelMatrix, 0, MAX_KINDS * MAX_KINDS);
+      },
       uploadPositions(n) { device.queue.writeBuffer(posBuf, 0, pos, 0, n * 3); },   // recenter only shifts positions; GPU keeps the authoritative velocities
     };
   } catch (e) {
@@ -1466,6 +1543,7 @@ async function runPhysics() {
       if (gpuBondsDirty) { gpu.uploadBonds(ballCount); gpuBondsDirty = false; }
       if (seekDirtyForGPU) { gpu.uploadSeek(ballCount); seekDirtyForGPU = false; }
       if (driftDirty) { gpu.uploadDrift(ballCount); driftDirty = false; }
+      if (kindDirtyForGPU) { gpu.uploadKinds(ballCount); kindDirtyForGPU = false; }
       gpu.step(ballCount, cfg.substeps);
       await gpu.readPositions(ballCount);
       let didRecenter = false;
@@ -1528,6 +1606,7 @@ async function loadProgram() {
   }
   buildLegend();
   populateScenarios();
+  if (gpu) gpu.uploadKindTables();        // per-kind speed + repel matrix
   console.log(`Parsed ${kindList.length} kinds, ${scenarios.size} scenarios:`, [...scenarios.keys()]);
   return true;
 }
@@ -1632,6 +1711,11 @@ function debugHtml(b) {
   const bonds = [];
   for (let s = 0; s < slotNames.length; s++) { const t = bond[b * MAX_SLOTS + s]; if (t >= 0) bonds.push(`${dbgEsc(slotNames[s])}→${dbgEsc(ballLabel(t))}`); }
   h += `<div class="meta">bonds: ${bonds.length ? bonds.join('  ') : '(none)'}</div>`;
+  const props = [];
+  const ki = kindId[b];
+  if (kindSpeed[ki] !== 1) props.push(`speed ${kindSpeed[ki]}`);
+  for (let k = 0; k < kindList.length; k++) { const d = repelMatrix[ki * MAX_KINDS + k]; if (d > 0) props.push(`repel ${dbgEsc(kindList[k])} ${d}`); }
+  if (props.length) h += `<div class="meta">${props.join('  ·  ')}</div>`;
   if (!def || !def.programs.length) return h + `<div class="meta">(no program — inert ball)</div>`;
   const stName = ['run', 'swim', 'sleep'];
   for (let l = 0; l < def.programs.length; l++) {

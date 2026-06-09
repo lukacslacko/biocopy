@@ -75,6 +75,35 @@ ball Polymerase {
 - A bond slot is `name: KindA | KindB | …;` (an optional `bond` keyword is accepted:
   `bond chain: End;`). The kind list is recorded for logging but not enforced.
 
+### Properties
+
+A kind can declare per-ball properties alongside its bond slots:
+
+```c
+ball Polymerase {
+    original: Chain; material: Blank; copy: Chain;
+    speed 2;                 // moves twice as fast as the default
+    repel Polymerase 5;      // stays at least 5 units from other Polymerases
+    { … }
+};
+```
+
+- **`speed <multiplier>;`** — scales how fast the ball moves under its own power
+  (swimming to a bind target, and `drift`). It's a **dimensionless multiplier on the
+  base swim thrust; default `1`.** `speed 2` ≈ twice the swim/drift velocity, `speed
+  0.5` half, `speed 0` never moves on its own. (As an approximate feel: at the default
+  physics settings, `speed 1` cruises a ball at very roughly **40–50 sim‑units per
+  second** toward its target — "sim‑units" being the same units as positions, where
+  the ball interaction radius is ~1. It's only approximate: the simulation isn't
+  wall‑clock calibrated, so the real rate scales with the framerate and the
+  *Sim substeps / frame* setting.)
+- **`repel <Kind> <distance>;`** — this kind pushes balls of `<Kind>` (and its
+  subkinds) away so the two never settle closer than `<distance>` **sim‑units** apart
+  (a soft minimum separation, like an enlarged collision radius that applies only
+  between those kinds). The rule is mutual in effect — declaring it on either kind
+  makes the pair repel. Multiple `repel` lines are allowed. Both `speed` and `repel`
+  are inherited (a subkind keeps its parent's, and `repel` rules accumulate).
+
 ### Actions
 
 | Action | Meaning |

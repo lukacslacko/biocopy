@@ -139,16 +139,9 @@ ball Polymerase {
 	};
 };
 
-ball PrePolymerase {
-	{
-		sleep 0s..10s;
-		kind = Polymerase;
-	}
-};
-
 scenario Test {
 	Blank * 1000;
-	PrePolymerase * 2;
+	Polymerase;
 	chain = Cap;
 	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
 	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
