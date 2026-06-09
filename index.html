@@ -396,6 +396,7 @@ const bond = new Int32Array(MAX_BALLS * MAX_SLOTS).fill(-1); // directed slots (
 const nbr  = new Int32Array(MAX_BALLS * MAX_NBR).fill(-1);   // undirected adjacency (physics)
 const seekTarget = new Int32Array(MAX_BALLS).fill(-1);     // ball this one is swimming toward, or -1
 const driftDir = new Float32Array(MAX_BALLS * 3);          // steady extra force while drifting (0 = none)
+const driftUntil = new Float64Array(MAX_BALLS);           // when the drift force expires (cleared on time, not on list roll)
 let ballCount = 0;
 let colorsDirty = true;
 let statsDirty = true;
@@ -889,7 +890,7 @@ function spawnScenario(name) {
   ballCount = 0;
   activeList = [];
   inActive.fill(0);
-  bond.fill(-1); nbr.fill(-1); seekTarget.fill(-1); pc.fill(-1); vmStatus.fill(0); driftDir.fill(0); drifting.fill(0); driftDirty = true;
+  bond.fill(-1); nbr.fill(-1); seekTarget.fill(-1); pc.fill(-1); vmStatus.fill(0); driftDir.fill(0); drifting.fill(0); driftUntil.fill(0); driftDirty = true;
   swimSince.fill(0); findMiss.fill(0); reshuffles = 0;
 
   const R = Math.max(2, cfg.containR - 2 * cfg.interact);
@@ -1025,10 +1026,10 @@ function execInstr(self, l, ins, now) {
     case 'go': pc[idx] = ins.to; return 'jump';
     case 'sleep': vmStatus[idx] = VM_SLEEP; vmSleepUntil[idx] = now + rollMs(ins); return 'next';
     case 'drift': {                              // like sleep, but drift in a random direction
-      const d = randomUnit(), a = SWIM_ACCEL * kindSpeed[kindId[self]];
+      const d = randomUnit(), a = SWIM_ACCEL * kindSpeed[kindId[self]], ms = rollMs(ins);
       driftDir[self * 3] = d.x * a; driftDir[self * 3 + 1] = d.y * a; driftDir[self * 3 + 2] = d.z * a;
-      driftDirty = true; drifting[idx] = 1;
-      vmStatus[idx] = VM_SLEEP; vmSleepUntil[idx] = now + rollMs(ins); return 'next';
+      driftDirty = true; drifting[idx] = 1; driftUntil[self] = now + ms;   // force expires on time, not when the (maybe low-weight) list is next rolled
+      vmStatus[idx] = VM_SLEEP; vmSleepUntil[idx] = now + ms; return 'next';
     }
     case 'setkind': {
       const t = resolvePath(self, ins.target);
@@ -1144,6 +1145,15 @@ let seekDirtyForGPU = false, driftDirty = false;
 function updatePrograms(now) {
   if (!activeList.length) return;
   for (let e = 0; e < activeList.length; e++) stepBall(activeList[e], now);
+  // Expire drift forces on time (a low-weight `drift` list may not be rolled again for
+  // a long while, so we must stop its force here rather than waiting for the list to wake).
+  for (let e = 0; e < activeList.length; e++) {
+    const i = activeList[e];
+    if (driftUntil[i] && now >= driftUntil[i]) {
+      driftUntil[i] = 0;
+      if (driftDir[i * 3] || driftDir[i * 3 + 1] || driftDir[i * 3 + 2]) { driftDir[i * 3] = driftDir[i * 3 + 1] = driftDir[i * 3 + 2] = 0; driftDirty = true; }
+    }
+  }
   seekDirtyForGPU = true;   // seekTarget may have changed; push to GPU before next step
 }
 
