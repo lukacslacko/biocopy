@@ -112,8 +112,8 @@ ball Polymerase {
 	material: Blank;
 	copy: Chain;
 
-	repel Polymerase 5;
-	speed 2;
+	repel Polymerase 8;
+	speed 1;
 
 	{
 		original = Cap;
@@ -137,11 +137,61 @@ ball Polymerase {
 		if (copy.kind != End) copy.kind = End;
 		copy = release;
 	};
+
+	0.001 {
+		drift 0.05s;
+	}
+};
+
+ball Monomerase {
+	chain: Chain;
+	next: Chain;
+	
+	speed 0.1;
+	repel Polymerase 5;
+
+	{
+		sleep 3s;
+		chain = Cap;
+		
+		digest:
+		sleep 1s;
+		next = chain.next;
+		chain.next = release;
+		next.prev = release;
+		chain.kind = Blank;
+		chain = next;
+		if (chain.kind != End) go digest;
+
+		chain.kind = Blank;
+		chain = release;
+		next.kind = Blank;
+		next = release;
+	};
+
+	0.05 {
+		drift 1s;
+	};
 };
 
 scenario Test {
 	Blank * 1000;
-	Polymerase;
+	Polymerase * 2;
+	Monomerase;
+	chain = Cap;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = End;    chain.next.prev = chain;
 	chain = Cap;
 	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
 	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;

@@ -171,6 +171,11 @@
     <button id="next" class="secondary">Next</button>
   </div>
 
+  <div class="toggles">
+    <label><input type="checkbox" id="showBonds" /> Bonds</label>
+    <label><input type="checkbox" id="retarget" checked /> Re-target stuck</label>
+  </div>
+
   <div class="legend" id="legend">
     <div class="note">Load a program to populate the legend.</div>
   </div>
@@ -180,7 +185,6 @@
 
     <div class="toggles">
       <label><input type="checkbox" id="shadows" checked /> Shadows</label>
-      <label><input type="checkbox" id="showBonds" /> Bonds</label>
       <label><input type="checkbox" id="showContain" /> Boundary</label>
     </div>
 
@@ -343,6 +347,7 @@ const SWIM_ACCEL = 0.60;          // steady seek thrust a ball applies toward a 
 const BOND_LINE_WIDTH = 3;        // bond line thickness in screen pixels (when bonds are shown)
 const BOND_VIEW_BALL_SCALE = 1 / 3;   // shrink balls to this fraction while bonds are shown
 const STEP_MAX_FRAMES = 4000;     // Next button: pause anyway after this many frames if nothing acts
+const SWIM_TIMEOUT_MS = 1500;     // if a `slot = Kind` swim can't reach its target in this long, pick a different one
 
 const cfg = {
   radius: 1.0,          // render radius (cosmetic)
@@ -359,6 +364,7 @@ const cfg = {
   showBonds: false,
   showContain: false,
   shadows: true,
+  retarget: true,       // re-target a `slot = Kind` swim that can't reach its target in time
 };
 
 // ---------------------------------------------------------------------------
@@ -411,8 +417,11 @@ const bindSlot  = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);
 const bindTarget = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);
 const bindWantKind = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);  // kindFind binds lock onto this kind
 const drifting = new Uint8Array(MAX_BALLS * MAX_LISTS);   // 1 while this list's `drift` is running
+const swimSince = new Float64Array(MAX_BALLS * MAX_LISTS); // time the current swim began (for the stuck timeout)
+const findMiss = new Uint8Array(MAX_BALLS * MAX_LISTS);   // 1 while a `slot = Kind` keeps finding no candidate
 const inActive = new Uint8Array(MAX_BALLS);
 let activeList = [];
+let reshuffles = 0;               // count of stuck-swim re-targets this run (debug stat)
 
 // ---------------------------------------------------------------------------
 // Parsed program tables (rebuilt by parseProgram)
@@ -881,6 +890,7 @@ function spawnScenario(name) {
   activeList = [];
   inActive.fill(0);
   bond.fill(-1); nbr.fill(-1); seekTarget.fill(-1); pc.fill(-1); vmStatus.fill(0); driftDir.fill(0); drifting.fill(0); driftDirty = true;
+  swimSince.fill(0); findMiss.fill(0); reshuffles = 0;
 
   const R = Math.max(2, cfg.containR - 2 * cfg.interact);
   const L0 = cfg.bondLen * cfg.interact;
@@ -969,6 +979,21 @@ function findNearest(ex, ey, ez, pred) {
   return best;
 }
 
+// Nearest ball (to `center`) matching kind `want` (or a subkind), excluding `owner`, the
+// ball already in owner.slot, and `exclude`. Used to re-shuffle a stuck `slot = Kind` swim
+// to a *nearby* candidate it can actually reach in time (not one across the soup).
+function findNearbyKind(center, owner, slot, want, exclude) {
+  const subs = kindSubtypes[want];
+  return findNearest(pos[center * 3], pos[center * 3 + 1], pos[center * 3 + 2],
+    i => i !== owner && i !== exclude && subs.has(kindId[i]) && bond[owner * MAX_SLOTS + slot] !== i);
+}
+// Throttled console note when a ball gives up on an unreachable by-kind target.
+function logStuck(self, want, oldT, ms) {
+  reshuffles++;
+  if (reshuffles <= 5 || reshuffles % 50 === 0)
+    console.warn(`[stuck] ${kindList[kindId[self]]} #${self} couldn't reach a ${kindList[want]} (target #${oldT}) in ${(ms / 1000).toFixed(1)}s — re-targeting. (${reshuffles} re-targets this run)`);
+}
+
 const COND_ERR = Symbol('cond-error');
 function evalOperand(self, o) {
   if (o.k === 'kindLit' || o.k === 'stateLit') return o.v;
@@ -1036,7 +1061,8 @@ function execInstr(self, l, ins, now) {
         const subs = kindSubtypes[wantKind];       // the kind and all its descendants
         T = findNearest(pos[self * 3], pos[self * 3 + 1], pos[self * 3 + 2],
           i => i !== owner && subs.has(kindId[i]) && bond[owner * MAX_SLOTS + ins.slot] !== i);
-        if (T < 0) return 'retry';                 // none of that kind around yet — try again next step
+        if (T < 0) { findMiss[idx] = 1; return 'retry'; }   // none of that kind exists/free — keep retrying
+        findMiss[idx] = 0;
       } else {
         T = resolvePath(self, ins.rhs.segs);
         if (T < 0) { logOnce(`${kindList[kindId[self]]}: bind ref resolved to nothing`); return 'next'; }
@@ -1045,7 +1071,7 @@ function execInstr(self, l, ins, now) {
       if (dist2(owner, T) <= bd * bd) { setBond(owner, ins.slot, T); return 'next'; }
       // too far → swim there, bind on arrival
       bindOwner[idx] = owner; bindSlot[idx] = ins.slot; bindTarget[idx] = T; bindWantKind[idx] = wantKind;
-      seekTarget[self] = T; vmStatus[idx] = VM_SWIM; return 'block';
+      seekTarget[self] = T; swimSince[idx] = now; vmStatus[idx] = VM_SWIM; return 'block';
     }
     case 'if': return evalCond(self, ins.cond) ? execInstr(self, l, ins.inner, now) : 'next';
   }
@@ -1081,6 +1107,16 @@ function tickList(self, l, instrs, now) {
     if (drifting[idx]) { drifting[idx] = 0; driftDir[self * 3] = driftDir[self * 3 + 1] = driftDir[self * 3 + 2] = 0; driftDirty = true; }
   }
   if (vmStatus[idx] === VM_SWIM) {
+    // A by-kind swim that can't reach its target in time (e.g. blocked by `repel`, or
+    // chasing a ball another agent is dragging) re-shuffles to the nearest other candidate.
+    if (cfg.retarget && bindWantKind[idx] >= 0 && now - swimSince[idx] > SWIM_TIMEOUT_MS) {
+      const owner = bindOwner[idx], slot = bindSlot[idx], oldT = bindTarget[idx];
+      logStuck(self, bindWantKind[idx], oldT, now - swimSince[idx]);
+      const nt = findNearbyKind(self, owner, slot, bindWantKind[idx], oldT);
+      if (nt >= 0) { bindTarget[idx] = nt; seekTarget[self] = nt; swimSince[idx] = now; }   // try the next-nearest one
+      else { if (seekTarget[self] === oldT) seekTarget[self] = -1; bindTarget[idx] = -1; vmStatus[idx] = VM_RUN; }  // nothing else — re-find/retry
+      return;
+    }
     if (swimTick(self, l) === 'done') { pc[idx]++; if (pc[idx] >= instrs.length) pc[idx] = 0; }
     return;                                          // 'abort' re-runs the bind next time; 'wait' keeps swimming
   }
@@ -1576,6 +1612,7 @@ function animate() {
 
   syncInstances();
   syncBondLines();
+  syncDebugOverlay();                   // ring the inspected ball + its bind targets, with a line to each
   controls.update();
   renderer.render(scene, camera);
   updateDebugTooltip();                 // live action-list inspector while D is held
@@ -1665,6 +1702,7 @@ document.getElementById('next').addEventListener('click', () => {
 
 document.getElementById('shadows').addEventListener('change', e => { cfg.shadows = e.target.checked; keyLight.castShadow = cfg.shadows; });
 document.getElementById('showBonds').addEventListener('change', e => { cfg.showBonds = e.target.checked; rebuildBondLines(); });
+document.getElementById('retarget').addEventListener('change', e => { cfg.retarget = e.target.checked; });
 document.getElementById('showContain').addEventListener('change', e => { cfg.showContain = e.target.checked; updateContainSphere(); });
 
 function updateContainSphere() { containSphere.scale.setScalar(cfg.containR); containSphere.visible = cfg.showContain; }
@@ -1679,6 +1717,103 @@ const dbgRay = new THREE.Raycaster();
 const dbgNdc = new THREE.Vector2();
 const dbgProj = new THREE.Vector3();
 const dbgEl = document.getElementById('dbg');
+
+// 3D overlay: a ring on the inspected ball, rings on its current bind targets, and a
+// bright line to each — so you can see what a `foo = Kind` swim is reaching for.
+const dbgSrcMark = new THREE.Mesh(ballGeo, new THREE.MeshBasicMaterial({ color: 0x6ea8fe, wireframe: true, transparent: true, opacity: 0.9 }));
+dbgSrcMark.visible = false; dbgSrcMark.frustumCulled = false; simGroup.add(dbgSrcMark);
+const dbgTgtMat = new THREE.MeshBasicMaterial({ color: 0xf7768e, wireframe: true, transparent: true, opacity: 0.95 });
+const dbgTgtMarks = [];
+for (let k = 0; k < MAX_LISTS; k++) { const m = new THREE.Mesh(ballGeo, dbgTgtMat); m.visible = false; m.frustumCulled = false; simGroup.add(m); dbgTgtMarks.push(m); }
+const dbgLineMat = new LineMaterial({ color: 0xf7768e, transparent: true, opacity: 0.95, linewidth: 4 });
+dbgLineMat.resolution.set(window.innerWidth, window.innerHeight);
+const dbgLineGeo = new LineSegmentsGeometry();
+dbgLineGeo.setPositions(new Float32Array(MAX_LISTS * 6));
+dbgLineGeo.instanceCount = 0;
+const dbgLine = new LineSegments2(dbgLineGeo, dbgLineMat);
+dbgLine.frustumCulled = false; dbgLine.visible = false;
+simGroup.add(dbgLine);
+
+// Amber rings + lines on the balls currently repelling the inspected ball (pushing it away).
+const DBG_REPEL_CAP = 24;
+const dbgRepMat = new THREE.MeshBasicMaterial({ color: 0xffb454, wireframe: true, transparent: true, opacity: 0.9 });
+const dbgRepMarks = [];
+for (let k = 0; k < DBG_REPEL_CAP; k++) { const m = new THREE.Mesh(ballGeo, dbgRepMat); m.visible = false; m.frustumCulled = false; simGroup.add(m); dbgRepMarks.push(m); }
+const dbgRepLineMat = new LineMaterial({ color: 0xffb454, transparent: true, opacity: 0.8, linewidth: 3 });
+dbgRepLineMat.resolution.set(window.innerWidth, window.innerHeight);
+const dbgRepLineGeo = new LineSegmentsGeometry();
+dbgRepLineGeo.setPositions(new Float32Array(DBG_REPEL_CAP * 6));
+dbgRepLineGeo.instanceCount = 0;
+const dbgRepLine = new LineSegments2(dbgRepLineGeo, dbgRepLineMat);
+dbgRepLine.frustumCulled = false; dbgRepLine.visible = false;
+simGroup.add(dbgRepLine);
+
+function repelDistJS(a, b) { return Math.max(repelMatrix[a * MAX_KINDS + b], repelMatrix[b * MAX_KINDS + a]); }
+// Balls within repel range of `b` that push it away (sorted nearest-first). Mutates `out`.
+function collectRepellers(b, out) {
+  out.length = 0;
+  if (maxRepelDist <= 0) return out;
+  const kb = kindId[b];
+  for (let j = 0; j < ballCount; j++) {
+    if (j === b) continue;
+    const rd = repelDistJS(kb, kindId[j]);
+    if (rd <= 0) continue;
+    const d2 = dist2(b, j);
+    if (d2 < rd * rd) out.push([d2, j]);
+  }
+  out.sort((x, y) => x[0] - y[0]);
+  return out;
+}
+const dbgRepBuf = [];
+
+function hideDebugOverlay() {
+  dbgSrcMark.visible = false; dbgLine.visible = false; dbgRepLine.visible = false;
+  for (const m of dbgTgtMarks) m.visible = false;
+  for (const m of dbgRepMarks) m.visible = false;
+}
+
+// Draw the inspected ball's bind targets (the balls its swimming lists are reaching for).
+function syncDebugOverlay() {
+  if (!dbgActive || dbgBall < 0 || dbgBall >= ballCount) { hideDebugOverlay(); return; }
+  const b = dbgBall;
+  const rr = cfg.radius * (cfg.showBonds ? BOND_VIEW_BALL_SCALE : 1);   // current rendered ball radius
+  dbgSrcMark.visible = true;
+  dbgSrcMark.position.set(pos[b * 3], pos[b * 3 + 1], pos[b * 3 + 2]);
+  dbgSrcMark.scale.setScalar(rr * 1.7 + 0.15);
+  const arr = dbgLine.geometry.attributes.instanceStart.data.array;
+  let seg = 0;
+  for (let l = 0; l < MAX_LISTS; l++) {
+    const idx = b * MAX_LISTS + l;
+    const t = (vmStatus[idx] === VM_SWIM) ? bindTarget[idx] : -1;
+    if (t < 0 || t >= ballCount) continue;
+    const m = dbgTgtMarks[seg];
+    m.visible = true; m.position.set(pos[t * 3], pos[t * 3 + 1], pos[t * 3 + 2]); m.scale.setScalar(rr * 1.9 + 0.2);
+    const o = seg * 6;
+    arr[o] = pos[b * 3]; arr[o + 1] = pos[b * 3 + 1]; arr[o + 2] = pos[b * 3 + 2];
+    arr[o + 3] = pos[t * 3]; arr[o + 4] = pos[t * 3 + 1]; arr[o + 5] = pos[t * 3 + 2];
+    seg++;
+  }
+  for (let k = seg; k < dbgTgtMarks.length; k++) dbgTgtMarks[k].visible = false;
+  dbgLine.geometry.instanceCount = seg;
+  dbgLine.visible = seg > 0;
+  if (seg > 0) dbgLine.geometry.attributes.instanceStart.data.needsUpdate = true;
+
+  // Repellers: amber ring + line on each ball currently pushing b away.
+  collectRepellers(b, dbgRepBuf);
+  const rk = Math.min(dbgRepBuf.length, dbgRepMarks.length);
+  const rarr = dbgRepLine.geometry.attributes.instanceStart.data.array;
+  for (let r = 0; r < rk; r++) {
+    const j = dbgRepBuf[r][1], m = dbgRepMarks[r];
+    m.visible = true; m.position.set(pos[j * 3], pos[j * 3 + 1], pos[j * 3 + 2]); m.scale.setScalar(rr * 2.1 + 0.25);
+    const o = r * 6;
+    rarr[o] = pos[b * 3]; rarr[o + 1] = pos[b * 3 + 1]; rarr[o + 2] = pos[b * 3 + 2];
+    rarr[o + 3] = pos[j * 3]; rarr[o + 4] = pos[j * 3 + 1]; rarr[o + 5] = pos[j * 3 + 2];
+  }
+  for (let k = rk; k < dbgRepMarks.length; k++) dbgRepMarks[k].visible = false;
+  dbgRepLine.geometry.instanceCount = rk;
+  dbgRepLine.visible = rk > 0;
+  if (rk > 0) dbgRepLine.geometry.attributes.instanceStart.data.needsUpdate = true;
+}
 
 renderer.domElement.addEventListener('pointermove', e => { ptrX = e.clientX; ptrY = e.clientY; });
 
@@ -1700,7 +1835,7 @@ window.addEventListener('keydown', e => {
   }
 });
 window.addEventListener('keyup', e => {
-  if (e.key === 'd' || e.key === 'D') { dbgActive = false; if (dbgEl) dbgEl.style.display = 'none'; }
+  if (e.key === 'd' || e.key === 'D') { dbgActive = false; if (dbgEl) dbgEl.style.display = 'none'; hideDebugOverlay(); }
 });
 
 const dbgEsc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
@@ -1716,14 +1851,25 @@ function debugHtml(b) {
   if (kindSpeed[ki] !== 1) props.push(`speed ${kindSpeed[ki]}`);
   for (let k = 0; k < kindList.length; k++) { const d = repelMatrix[ki * MAX_KINDS + k]; if (d > 0) props.push(`repel ${dbgEsc(kindList[k])} ${d}`); }
   if (props.length) h += `<div class="meta">${props.join('  ·  ')}</div>`;
+  if (maxRepelDist > 0) {
+    collectRepellers(b, dbgRepBuf);
+    if (dbgRepBuf.length) h += `<div class="meta" style="color:#ffb454">⊘ repelled by ${dbgRepBuf.length} nearby (amber) — pushed away, may not reach its target</div>`;
+  }
   if (!def || !def.programs.length) return h + `<div class="meta">(no program — inert ball)</div>`;
   const stName = ['run', 'swim', 'sleep'];
   for (let l = 0; l < def.programs.length; l++) {
     const prog = def.programs[l], idx = b * MAX_LISTS + l, cur = pc[idx], st = vmStatus[idx];
     let tag = stName[st] || st;
-    if (st === VM_SWIM) tag += ` → ${dbgEsc(ballLabel(bindTarget[idx]))}`;
-    else if (st === VM_SLEEP && drifting[idx]) tag = 'drift';
+    if (st === VM_SWIM) {
+      const secs = (performance.now() - swimSince[idx]) / 1000;
+      tag += ` → ${dbgEsc(ballLabel(bindTarget[idx]))}  ${secs.toFixed(1)}s`;
+      if (secs * 1000 > SWIM_TIMEOUT_MS) tag += ' ⚠ stuck (will re-target)';
+    } else if (st === VM_SLEEP && drifting[idx]) tag = 'drift';
     else if (cur < 0) tag = 'halted';
+    // a `slot = Kind` that keeps finding nothing (e.g. that kind is used up)
+    const ci = (cur >= 0 && cur < prog.instrs.length) ? prog.instrs[cur] : null;
+    if (st === VM_RUN && findMiss[idx] && ci && ci.op === 'bind' && ci.rhs.type === 'kindFind')
+      tag += ` · searching ${dbgEsc(kindList[ci.rhs.kindId])} — none available`;
     h += `<div class="lh">list ${l} · weight ${prog.weight} · ${tag}</div>`;
     for (let i = 0; i < prog.instrs.length; i++) {
       const lbls = prog.labels.get(i);
@@ -1756,6 +1902,8 @@ window.addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
   if (bondLines) bondLines.material.resolution.set(window.innerWidth, window.innerHeight);   // fat lines need pixel resolution
+  dbgLineMat.resolution.set(window.innerWidth, window.innerHeight);
+  dbgRepLineMat.resolution.set(window.innerWidth, window.innerHeight);
 });
 
 // ---------------------------------------------------------------------------
