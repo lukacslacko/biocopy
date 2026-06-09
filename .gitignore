@@ -7,3 +7,7 @@
 *.orig
 *.swp
 *.swo
+
+# Editor lock files (Emacs .#name, Vim 4913, etc.)
+.\#*
+\#*\#

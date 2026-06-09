@@ -127,12 +127,22 @@ ball Polymerase {
 		material.prev = copy;
 		copy = material;
 		if (copy.kind != End) go clone;
-		
+
 		original = release;
 		material = release;
 		copy = release;
 		go start;
+	};
+
+	/*
+	0.001 {
+		start:
+		original = release;
+		material = release;
+		copy = release;
+		go start;	
 	}
+	*/
 };
 
 /*
@@ -159,12 +169,23 @@ ball Monomerase {
 		prev = release;
 		sleep 5s;
 		go start;
-	}
+	};
+
+	/*
+	0.001 {
+		start:
+		chain = release;
+		prev = release;
+		sleep 5s;
+		go start;
+	};
+	*/
 };
 
 /*
 A simple test scenario.
 */
+/*
 scenario Test {
 	Blank * 1000;
 	Polymerase;
@@ -177,6 +198,7 @@ scenario Test {
 	chain = chain.next;
 	chain.next = End;
 };
+*/
 
 /*
 The Monomerase walks a chain backwards (chain.prev), so the template must be
@@ -186,8 +208,7 @@ both copy.next and material.prev on every monomer it copies).
 */
 scenario TestWithMonomerase {
 	Blank * 1000;
-	Polymerase * 3;
-	Monomerase;
+	Polymerase;
 	chain = Cap;
 	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
 	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;

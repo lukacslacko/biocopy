@@ -313,11 +313,10 @@ simGroup.add(containSphere);
 const MAX_BALLS = 40000;          // headroom for the GPU path (CPU stays well below)
 const MAX_SLOTS = 8;              // distinct named bond slots a program may use
 const MAX_NBR   = 8;              // physics adjacency width (bonds per ball)
+const MAX_LISTS = 6;              // parallel weighted action lists a kind may define
 
 // Behavior constants (will eventually be specified per-program, not in the UI).
 const SWIM_ACCEL = 0.60;          // steady seek thrust a ball applies toward a bind target
-const NEAR_BIAS  = 0.20;          // prefer nearer candidates when finding a ball by kind
-const VM_BUDGET  = 64;            // max instructions a ball runs per frame (guards go-loops)
 
 const cfg = {
   radius: 1.0,          // render radius (cosmetic)
@@ -369,22 +368,25 @@ let colorsDirty = true;
 let statsDirty = true;
 let gpuBondsDirty = false;        // nbr changed → re-upload before next GPU step
 
-// Per-ball VM state (only "active" balls — those whose kind has a program — run).
+// Per-ball VM state. A kind may define several action lists; each runs "in parallel"
+// with its own pointer/blocking state, indexed [ball*MAX_LISTS + list]. Each sim step
+// a ball rolls one list (weighted) and advances it by one action. seekTarget is per
+// ball (physics can only swim one direction at a time — the most recent swimmer wins).
 const VM_RUN = 0, VM_SWIM = 1, VM_SLEEP = 2;
-const pc = new Int32Array(MAX_BALLS).fill(-1);
-const vmStatus = new Uint8Array(MAX_BALLS);
-const vmSleepUntil = new Float64Array(MAX_BALLS);
-const bindOwner = new Int32Array(MAX_BALLS).fill(-1);
-const bindSlot  = new Int32Array(MAX_BALLS).fill(-1);
-const bindTarget = new Int32Array(MAX_BALLS).fill(-1);
-const bindWantKind = new Int32Array(MAX_BALLS).fill(-1);   // kindFind binds lock onto this kind
+const pc = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);
+const vmStatus = new Uint8Array(MAX_BALLS * MAX_LISTS);
+const vmSleepUntil = new Float64Array(MAX_BALLS * MAX_LISTS);
+const bindOwner = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);
+const bindSlot  = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);
+const bindTarget = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);
+const bindWantKind = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);  // kindFind binds lock onto this kind
 const inActive = new Uint8Array(MAX_BALLS);
 let activeList = [];
 
 // ---------------------------------------------------------------------------
 // Parsed program tables (rebuilt by parseProgram)
 // ---------------------------------------------------------------------------
-let kinds = new Map();            // name -> { name, parent, slots:Map, program:[instr]|null }
+let kinds = new Map();            // name -> { name, parent, slots:Map, programs:[{weight,instrs}], totalWeight }
 let kindList = [];                // kindId -> name
 let kindIndex = new Map();        // name -> kindId
 let slotIndex = new Map();        // slot name -> global slot id
@@ -421,28 +423,44 @@ function tokenize(src) {
     if (c === '/' && src[i + 1] === '*') { i += 2; while (i < n && !(src[i] === '*' && src[i + 1] === '/')) i++; i += 2; continue; }
     if (c === '/' && src[i + 1] === '/') { i += 2; while (i < n && src[i] !== '\n') i++; continue; }
     if (c === ' ' || c === '\t' || c === '\r' || c === '\n') { i++; continue; }
-    if (isIdStart(c)) { let j = i + 1; while (j < n && isIdChar(src[j])) j++; toks.push({ t: 'id', v: src.slice(i, j) }); i = j; continue; }
-    if (isDigit(c)) { let j = i + 1; while (j < n && (isDigit(src[j]) || src[j] === '.')) j++; toks.push({ t: 'num', v: src.slice(i, j) }); i = j; continue; }
-    if ((c === '!' || c === '=') && src[i + 1] === '=') { toks.push({ t: 'op', v: c + '=' }); i += 2; continue; }
-    if ('{}()[];:=.|*'.indexOf(c) >= 0) { toks.push({ t: 'op', v: c }); i++; continue; }
+    if (isIdStart(c)) { let j = i + 1; while (j < n && isIdChar(src[j])) j++; toks.push({ t: 'id', v: src.slice(i, j), pos: i }); i = j; continue; }
+    if (isDigit(c)) { let j = i + 1; while (j < n && (isDigit(src[j]) || src[j] === '.')) j++; toks.push({ t: 'num', v: src.slice(i, j), pos: i }); i = j; continue; }
+    if ((c === '!' || c === '=') && src[i + 1] === '=') { toks.push({ t: 'op', v: c + '=', pos: i }); i += 2; continue; }
+    if ('{}()[];:=.|*'.indexOf(c) >= 0) { toks.push({ t: 'op', v: c, pos: i }); i++; continue; }
     i++; // skip anything unexpected
   }
+  toks.push({ t: 'eof', v: '<end of input>', pos: n });   // sentinel so errors always have a token
   return toks;
 }
 
-// Parse a full program: fills kinds/kindList/scenarios/etc. Throws on syntax error.
-function parseProgram(src) {
+// Parse a full program: fills kinds/kindList/scenarios/etc. Throws a located error.
+function parseProgram(src, srcName) {
+  srcName = srcName || 'program';
   const toks = tokenize(src);
   let p = 0;
+  // Turn a token (or the EOF sentinel) into a "file:line:col: msg" error with a caret.
+  function posToLineCol(pos) {
+    let line = 1, last = 0;
+    for (let k = 0; k < pos && k < src.length; k++) if (src[k] === '\n') { line++; last = k + 1; }
+    return { line, col: pos - last + 1 };
+  }
+  function fail(msg, tok) {
+    const pos = tok ? tok.pos : src.length;
+    const { line, col } = posToLineCol(pos);
+    let ls = src.lastIndexOf('\n', pos - 1) + 1;
+    let le = src.indexOf('\n', pos); if (le < 0) le = src.length;
+    const snippet = '\n    ' + src.slice(ls, le) + '\n    ' + ' '.repeat(Math.max(0, pos - ls)) + '^';
+    throw new Error(`${srcName}:${line}:${col}: ${msg}${snippet}`);
+  }
   const at = v => toks[p] && toks[p].v === v;
   const isId = () => toks[p] && toks[p].t === 'id';
-  const expect = v => { if (!at(v)) throw new Error(`expected '${v}' but got '${toks[p] ? toks[p].v : 'EOF'}'`); return toks[p++]; };
-  const expectId = () => { if (!isId()) throw new Error(`expected identifier but got '${toks[p] ? toks[p].v : 'EOF'}'`); return toks[p++].v; };
+  const expect = v => { if (!at(v)) fail(`expected '${v}' but got '${toks[p].v}'`, toks[p]); return toks[p++]; };
+  const expectId = () => { if (!isId()) fail(`expected an identifier but got '${toks[p].v}'`, toks[p]); return toks[p++].v; };
 
   function captureBraced() {
     expect('{');
     const start = p; let depth = 1;
-    while (p < toks.length && depth > 0) {
+    while (toks[p].t !== 'eof' && depth > 0) {
       if (at('{')) depth++;
       else if (at('}')) { depth--; if (depth === 0) break; }
       p++;
@@ -456,10 +474,13 @@ function parseProgram(src) {
     let parent = null;
     if (at(':')) { p++; parent = expectId(); }
     expect('{');
-    const slotDecls = []; let actionToks = null;
+    const slotDecls = []; const actionLists = [];   // each: { weight, toks }
     while (!at('}')) {
-      if (at('{')) { actionToks = captureBraced(); }
-      else {
+      if (at('{')) { actionLists.push({ weight: 1.0, toks: captureBraced() }); if (at(';')) p++; }
+      else if (toks[p] && toks[p].t === 'num' && toks[p + 1] && toks[p + 1].v === '{') {
+        const w = parseFloat(toks[p++].v);          // weighted action list:  <weight> { … }
+        actionLists.push({ weight: w, toks: captureBraced() }); if (at(';')) p++;
+      } else {
         if (at('bond')) p++;            // optional 'bond' keyword
         const sName = expectId(); expect(':');
         const types = [expectId()];
@@ -470,7 +491,7 @@ function parseProgram(src) {
     }
     expect('}');
     if (at(';')) p++;
-    return { name, parent, slotDecls, actionToks };
+    return { name, parent, slotDecls, actionLists };
   }
   function parseScenRaw() {
     const name = expectId();
@@ -481,10 +502,10 @@ function parseProgram(src) {
 
   // Pass A: structural
   const ballsRaw = [], scenRaw = [];
-  while (p < toks.length) {
+  while (toks[p].t !== 'eof') {
     if (at('ball')) { p++; ballsRaw.push(parseBallRaw()); }
     else if (at('scenario')) { p++; scenRaw.push(parseScenRaw()); }
-    else throw new Error(`unexpected token '${toks[p].v}' at top level`);
+    else fail(`expected 'ball' or 'scenario' but got '${toks[p].v}'`, toks[p]);
   }
 
   // Build name tables
@@ -518,21 +539,22 @@ function parseProgram(src) {
     for (const s of b.slotDecls) m.set(s.name, s.types);
     return m;
   }
-  function inheritedActions(name) {
+  function inheritedActionLists(name) {
     const b = rawByName.get(name);
-    if (!b) return null;
-    if (b.actionToks) return b.actionToks;
-    return b.parent ? inheritedActions(b.parent) : null;
+    if (!b) return [];
+    if (b.actionLists.length) return b.actionLists;
+    return b.parent ? inheritedActionLists(b.parent) : [];
   }
 
   // Compile a kind's action block into an instruction list.
   function compileActions(T, def) {
     let q = 0;
+    const cur = () => T[q] || T[T.length - 1];   // current token, or last (for end-of-block)
     const atA = v => T[q] && T[q].v === v;
     const isIdA = () => T[q] && T[q].t === 'id';
     const nextA = () => T[q++];
-    const expectA = v => { if (!atA(v)) throw new Error(`[${def.name}] expected '${v}' got '${T[q] ? T[q].v : 'EOF'}'`); return T[q++]; };
-    const expectIdA = () => { if (!isIdA()) throw new Error(`[${def.name}] expected id got '${T[q] ? T[q].v : 'EOF'}'`); return T[q++].v; };
+    const expectA = v => { if (!atA(v)) fail(`in ball '${def.name}': expected '${v}' but got '${cur().v}'`, cur()); return T[q++]; };
+    const expectIdA = () => { if (!isIdA()) fail(`in ball '${def.name}': expected an identifier but got '${cur().v}'`, cur()); return T[q++].v; };
     const ownSlots = def.slots;
     const isOwnSlot = id => ownSlots.has(id);
     const isKind = id => kindIndex.has(id);
@@ -576,7 +598,7 @@ function parseProgram(src) {
       return { op: opv, a, b };
     }
     function parseOne() {
-      if (atA('go')) { q++; const name = expectIdA(); const ins = { op: 'go', to: -1, name }; gofix.push(ins); eatSemi(); return ins; }
+      if (atA('go')) { q++; const tok = cur(); const name = expectIdA(); const ins = { op: 'go', to: -1, name, tok }; gofix.push(ins); eatSemi(); return ins; }
       if (atA('sleep')) {
         q++; const num = parseFloat(nextA().v); let ms = num * 1000;
         if (isIdA() && T[q].v === 'ms') { q++; ms = num; }
@@ -595,28 +617,31 @@ function parseProgram(src) {
     }
 
     while (q < T.length) {
-      if (isIdA() && T[q + 1] && T[q + 1].v === ':') { const name = nextA().v; q++; labelMap.set(name, instrs.length); instrs.push({ op: 'label', name }); continue; }
+      // A label is a pure marker → it points at the next real instruction (no no-op emitted).
+      if (isIdA() && T[q + 1] && T[q + 1].v === ':') { const name = nextA().v; q++; labelMap.set(name, instrs.length); continue; }
       instrs.push(parseOne());
     }
-    for (const g of gofix) { if (!labelMap.has(g.name)) throw new Error(`[${def.name}] unknown label '${g.name}'`); g.to = labelMap.get(g.name); }
+    for (const g of gofix) { if (!labelMap.has(g.name)) fail(`in ball '${def.name}': unknown label '${g.name}'`, g.tok); g.to = labelMap.get(g.name); }
     return instrs;
   }
 
   // Compile a scenario body into builder statements.
-  function compileScenario(T) {
+  function compileScenario(T, sName) {
     let q = 0;
+    const cur = () => T[q] || T[T.length - 1];
     const atS = v => T[q] && T[q].v === v;
     const isIdS = () => T[q] && T[q].t === 'id';
     const nextS = () => T[q++];
     function parseDotted() { const a = [expectIdSc()]; while (atS('.')) { q++; a.push(expectIdSc()); } return a; }
-    function expectIdSc() { if (!isIdS()) throw new Error('[scenario] expected id'); return T[q++].v; }
+    function expectIdSc() { if (!isIdS()) fail(`in scenario '${sName}': expected an identifier but got '${cur().v}'`, cur()); return T[q++].v; }
     function segs(ids) { return ids.map(getSlot); }
     const stmts = [], vars = new Set();
     while (q < T.length) {
+      const lead = cur();
       const ids = parseDotted();
       if (atS('*')) {
         q++; const num = parseInt(nextS().v, 10);
-        if (!kindIndex.has(ids[0])) throw new Error(`[scenario] unknown kind '${ids[0]}'`);
+        if (!kindIndex.has(ids[0])) fail(`in scenario '${sName}': unknown kind '${ids[0]}'`, lead);
         stmts.push({ op: 'createMany', kid: kindIndex.get(ids[0]), n: num }); if (atS(';')) q++; continue;
       }
       if (atS('=')) {
@@ -649,20 +674,22 @@ function parseProgram(src) {
         }
         if (atS(';')) q++; continue;
       }
-      if (!kindIndex.has(ids[0])) throw new Error(`[scenario] unknown kind or statement '${ids[0]}'`);
+      if (!kindIndex.has(ids[0])) fail(`in scenario '${sName}': unknown kind or statement '${ids[0]}'`, lead);
       stmts.push({ op: 'createOne', kid: kindIndex.get(ids[0]) }); if (atS(';')) q++;
     }
     return stmts;
   }
 
-  // Build kind defs, then compile programs and scenarios.
-  for (const b of ballsRaw) kinds.set(b.name, { name: b.name, parent: b.parent, slots: mergedSlots(b.name), program: null });
+  // Build kind defs, then compile each kind's (possibly several, weighted) action lists.
+  for (const b of ballsRaw) kinds.set(b.name, { name: b.name, parent: b.parent, slots: mergedSlots(b.name), programs: [], totalWeight: 0 });
   for (const b of ballsRaw) {
     const def = kinds.get(b.name);
-    const acts = inheritedActions(b.name);
-    if (acts && acts.length) def.program = compileActions(acts, def);
+    const lists = inheritedActionLists(b.name);
+    if (lists.length > MAX_LISTS) throw new Error(`ball '${b.name}' has too many action lists (max ${MAX_LISTS})`);
+    def.programs = lists.map(L => ({ weight: L.weight, instrs: compileActions(L.toks, def) }));
+    def.totalWeight = def.programs.reduce((s, p) => s + p.weight, 0);
   }
-  for (const s of scenRaw) scenarios.set(s.name, compileScenario(s.bodyToks));
+  for (const s of scenRaw) scenarios.set(s.name, compileScenario(s.bodyToks, s.name));
 }
 
 // ---------------------------------------------------------------------------
@@ -717,12 +744,22 @@ function setKind(i, kid) {
   if (kindId[i] === kid) return;
   kindId[i] = kid; colorsDirty = true; statsDirty = true;
   const def = kinds.get(kindList[kid]);
-  if (def && def.program) { if (pc[i] < 0) initVM(i); }
-  else { pc[i] = -1; vmStatus[i] = VM_RUN; seekTarget[i] = -1; }
+  if (def && def.programs.length) { if (!inActive[i]) initVM(i); }
+  else if (inActive[i]) haltVM(i);
 }
 function initVM(i) {
-  pc[i] = 0; vmStatus[i] = VM_RUN; bindTarget[i] = -1; seekTarget[i] = -1; vmSleepUntil[i] = 0;
+  const def = kinds.get(kindList[kindId[i]]);
+  const n = def ? def.programs.length : 0;
+  for (let l = 0; l < n; l++) {
+    const idx = i * MAX_LISTS + l;
+    pc[idx] = 0; vmStatus[idx] = VM_RUN; bindTarget[idx] = -1; vmSleepUntil[idx] = 0;
+  }
+  seekTarget[i] = -1;
   if (!inActive[i]) { inActive[i] = 1; activeList.push(i); }
+}
+function haltVM(i) {
+  for (let l = 0; l < MAX_LISTS; l++) { pc[i * MAX_LISTS + l] = -1; vmStatus[i * MAX_LISTS + l] = VM_RUN; }
+  seekTarget[i] = -1; inActive[i] = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -755,7 +792,7 @@ function spawnScenario(name) {
     pos[i * 3] = x; pos[i * 3 + 1] = y; pos[i * 3 + 2] = z;
     vel[i * 3] = vel[i * 3 + 1] = vel[i * 3 + 2] = 0;
     const def = kinds.get(kindList[kid]);
-    if (def && def.program) initVM(i);
+    if (def && def.programs.length) initVM(i);
     return i;
   }
 
@@ -813,40 +850,43 @@ function spawnScenario(name) {
 function resolvePath(self, segs) { let b = self; for (let k = 0; k < segs.length; k++) { b = bond[b * MAX_SLOTS + segs[k]]; if (b < 0) return -1; } return b; }
 function dist2(a, b) { const dx = pos[a * 3] - pos[b * 3], dy = pos[a * 3 + 1] - pos[b * 3 + 1], dz = pos[a * 3 + 2] - pos[b * 3 + 2]; return dx * dx + dy * dy + dz * dz; }
 
-// Weighted-random pick biased toward nearer balls (A-Res reservoir, weight=exp(-bias·d)).
-function pickNearBiased(ex, ey, ez, pred) {
-  let best = -1, bestKey = -1;
+// Nearest ball matching `pred` — picks one from really close, so agents grab what's
+// right next to them instead of racing across the soup for the same far-off ball.
+function findNearest(ex, ey, ez, pred) {
+  let best = -1, bestD2 = Infinity;
   for (let i = 0; i < ballCount; i++) {
     if (!pred(i)) continue;
     const dx = pos[i * 3] - ex, dy = pos[i * 3 + 1] - ey, dz = pos[i * 3 + 2] - ez;
-    const w = Math.exp(-NEAR_BIAS * Math.sqrt(dx * dx + dy * dy + dz * dz));
-    if (w <= 0) continue;
-    const key = Math.pow(Math.random(), 1 / w);
-    if (key > bestKey) { bestKey = key; best = i; }
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 < bestD2) { bestD2 = d2; best = i; }
   }
   return best;
 }
 
+const COND_ERR = Symbol('cond-error');
 function evalOperand(self, o) {
-  if (o.k === 'kindLit') return o.v;
-  if (o.k === 'stateLit') return o.v;
+  if (o.k === 'kindLit' || o.k === 'stateLit') return o.v;
   const b = resolvePath(self, o.segs);
-  if (b < 0) return -999;
+  if (b < 0) return COND_ERR;                       // referenced ball missing
   return o.k === 'kindOf' ? kindId[b] : stateId[b];
 }
+// A condition whose operands can't be resolved is treated as FALSE: e.g.
+// `if (copy.kind != End) go clone;` simply falls through when `copy` is unbound.
 function evalCond(self, c) {
   const a = evalOperand(self, c.a), b = evalOperand(self, c.b);
+  if (a === COND_ERR || b === COND_ERR) return false;
   return c.op === '==' ? a === b : a !== b;
 }
 
 const bindDist = () => 2.4 * cfg.interact;
 
-// Execute one instruction. Returns 'next' | 'jump' | 'block' | 'retry'.
-function execInstr(self, ins, now) {
+// Execute one instruction of list `l` on ball `self`. Returns 'next' | 'jump' |
+// 'block' (started a swim/sleep) | 'retry' (couldn't act yet, keep the pointer).
+function execInstr(self, l, ins, now) {
+  const idx = self * MAX_LISTS + l;
   switch (ins.op) {
-    case 'label': return 'next';
-    case 'go': pc[self] = ins.to; return 'jump';
-    case 'sleep': vmStatus[self] = VM_SLEEP; vmSleepUntil[self] = now + ins.ms; pc[self]++; return 'block';
+    case 'go': pc[idx] = ins.to; return 'jump';
+    case 'sleep': vmStatus[idx] = VM_SLEEP; vmSleepUntil[idx] = now + ins.ms; return 'next';
     case 'setkind': {
       const t = resolvePath(self, ins.target);
       if (t < 0) { logOnce(`${kindList[kindId[self]]}: setkind on missing ball`); return 'next'; }
@@ -874,53 +914,70 @@ function execInstr(self, ins, now) {
       let T, wantKind = -1;
       if (ins.rhs.type === 'kindFind') {
         wantKind = ins.rhs.kindId;
-        T = pickNearBiased(pos[self * 3], pos[self * 3 + 1], pos[self * 3 + 2], i => i !== owner && kindId[i] === wantKind && bond[owner * MAX_SLOTS + ins.slot] !== i);
-        if (T < 0) return 'retry';                 // nothing available yet — try again next frame
+        T = findNearest(pos[self * 3], pos[self * 3 + 1], pos[self * 3 + 2],
+          i => i !== owner && kindId[i] === wantKind && bond[owner * MAX_SLOTS + ins.slot] !== i);
+        if (T < 0) return 'retry';                 // none of that kind around yet — try again next step
       } else {
         T = resolvePath(self, ins.rhs.segs);
         if (T < 0) { logOnce(`${kindList[kindId[self]]}: bind ref resolved to nothing`); return 'next'; }
       }
       const bd = bindDist();
       if (dist2(owner, T) <= bd * bd) { setBond(owner, ins.slot, T); return 'next'; }
-      // too far → swim to it, then bind on arrival
-      bindOwner[self] = owner; bindSlot[self] = ins.slot; bindTarget[self] = T; bindWantKind[self] = wantKind;
-      seekTarget[self] = T; vmStatus[self] = VM_SWIM; return 'block';
+      // too far → swim there, bind on arrival
+      bindOwner[idx] = owner; bindSlot[idx] = ins.slot; bindTarget[idx] = T; bindWantKind[idx] = wantKind;
+      seekTarget[self] = T; vmStatus[idx] = VM_SWIM; return 'block';
     }
-    case 'if': return evalCond(self, ins.cond) ? execInstr(self, ins.inner, now) : 'next';
+    case 'if': return evalCond(self, ins.cond) ? execInstr(self, l, ins.inner, now) : 'next';
   }
   return 'next';
 }
 
-function swimTick(self) {
-  const owner = bindOwner[self], slot = bindSlot[self], want = bindWantKind[self];
-  let T = bindTarget[self];
+// Continue a swim in progress. Returns 'wait' | 'done' | 'abort'.
+function swimTick(self, l) {
+  const idx = self * MAX_LISTS + l;
+  const owner = bindOwner[idx], want = bindWantKind[idx];
+  const T = bindTarget[idx];
   let valid = T >= 0 && T < ballCount && owner >= 0 && owner < ballCount;
   if (valid && want >= 0 && kindId[T] !== want) valid = false;     // target changed identity
-  if (!valid) { seekTarget[self] = -1; bindTarget[self] = -1; vmStatus[self] = VM_RUN; return; }
+  if (!valid) { if (seekTarget[self] === T) seekTarget[self] = -1; bindTarget[idx] = -1; vmStatus[idx] = VM_RUN; return 'abort'; }
   seekTarget[self] = T;                                            // keep thrusting toward it
   const bd = bindDist();
   if (dist2(owner, T) <= bd * bd) {
-    setBond(owner, slot, T);
-    seekTarget[self] = -1; bindTarget[self] = -1; vmStatus[self] = VM_RUN;
-    pc[self]++;                                                    // the blocking action completed
+    setBond(owner, bindSlot[idx], T);
+    if (seekTarget[self] === T) seekTarget[self] = -1;
+    bindTarget[idx] = -1; vmStatus[idx] = VM_RUN;
+    return 'done';
   }
+  return 'wait';
 }
 
-function stepBall(self, now) {
-  if (vmStatus[self] === VM_SLEEP) { if (now < vmSleepUntil[self]) return; vmStatus[self] = VM_RUN; }
-  if (vmStatus[self] === VM_SWIM) { swimTick(self); return; }
-  const def = kinds.get(kindList[kindId[self]]);
-  const prog = def && def.program;
-  if (!prog) { pc[self] = -1; return; }
-  let budget = VM_BUDGET;
-  while (budget-- > 0 && vmStatus[self] === VM_RUN) {
-    let ip = pc[self];
-    if (ip < 0 || ip >= prog.length) { pc[self] = -1; return; }
-    const res = execInstr(self, prog[ip], now);
-    if (res === 'block' || res === 'retry') return;
-    if (res === 'next') pc[self] = ip + 1;
-    // 'jump' already set pc
+// Advance one action of one list. Lists loop (the pointer wraps to the start).
+function tickList(self, l, instrs, now) {
+  if (instrs.length === 0) return;
+  const idx = self * MAX_LISTS + l;
+  if (vmStatus[idx] === VM_SLEEP) { if (now < vmSleepUntil[idx]) return; vmStatus[idx] = VM_RUN; }
+  if (vmStatus[idx] === VM_SWIM) {
+    if (swimTick(self, l) === 'done') { pc[idx]++; if (pc[idx] >= instrs.length) pc[idx] = 0; }
+    return;                                          // 'abort' re-runs the bind next time; 'wait' keeps swimming
   }
+  let ip = pc[idx];
+  if (ip < 0 || ip >= instrs.length) ip = pc[idx] = 0;
+  const res = execInstr(self, l, instrs[ip], now);
+  if (res === 'block' || res === 'retry') return;
+  if (res === 'next') { pc[idx] = ip + 1; if (pc[idx] >= instrs.length) pc[idx] = 0; }
+  // 'jump' already set pc
+}
+
+// One simulation step for a ball: roll one of its action lists (weighted) and
+// advance just that list by a single action. Lists run "in parallel" — each keeps
+// its own pointer/blocking state — at a rate proportional to its weight.
+function stepBall(self, now) {
+  const def = kinds.get(kindList[kindId[self]]);
+  if (!def || !def.programs.length) return;
+  const progs = def.programs;
+  let r = Math.random() * def.totalWeight, l = 0;
+  while (l < progs.length - 1 && r >= progs[l].weight) { r -= progs[l].weight; l++; }
+  tickList(self, l, progs[l].instrs, now);
 }
 
 let seekDirtyForGPU = false;
@@ -1348,17 +1405,20 @@ function animate() {
 // Program loading
 // ---------------------------------------------------------------------------
 async function loadProgram() {
-  let src = null;
+  let src = null, srcName = 'copy.prog';
   try {
     const r = await fetch('copy.prog', { cache: 'no-store' });
     if (r.ok) src = await r.text();
   } catch (_) { /* file:// or missing — fall back below */ }
-  if (src == null) { console.warn('Could not fetch copy.prog; using the embedded default program.'); src = DEFAULT_PROG; }
+  if (src == null) { console.warn('Could not fetch copy.prog; using the embedded default program.'); src = DEFAULT_PROG; srcName = '(embedded default)'; }
   try {
-    parseProgram(src);
+    parseProgram(src, srcName);
   } catch (e) {
-    console.error('Program parse error:', e.message);
-    document.getElementById('legend').innerHTML = '<div class="note">Parse error: ' + e.message + '</div>';
+    console.error('Program parse error:\n' + e.message);   // multi-line: location + caret
+    const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    document.getElementById('legend').innerHTML =
+      '<div class="note" style="color:var(--accent-2)">Parse error</div>' +
+      '<pre style="white-space:pre-wrap; font-size:11px; margin:6px 0 0; color:var(--ink-dim)">' + esc(e.message) + '</pre>';
     return false;
   }
   buildLegend();
