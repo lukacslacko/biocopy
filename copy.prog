@@ -112,6 +112,9 @@ ball Polymerase {
 	material: Blank;
 	copy: Chain;
 
+	repel Polymerase 5;
+	speed 2;
+
 	{
 		original = Cap;
 		material = Blank;
@@ -136,10 +139,23 @@ ball Polymerase {
 	};
 };
 
+ball PrePolymerase {
+	{
+		sleep 0s..10s;
+		kind = Polymerase;
+	}
+};
+
 scenario Test {
 	Blank * 1000;
-	Polymerase;
+	PrePolymerase * 2;
 	chain = Cap;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
 	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
 	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
 	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
