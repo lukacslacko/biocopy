@@ -175,5 +175,25 @@ scenario Test {
 	chain = chain.next;
 	chain.next = Info_3;
 	chain = chain.next;
-	chain = End;
+	chain.next = End;
+};
+
+/*
+The Monomerase walks a chain backwards (chain.prev), so the template must be
+doubly linked: bonds are directed, so each `next` needs a matching `prev`. The
+`chain.next.prev = chain` line sets that back-link (the Polymerase likewise sets
+both copy.next and material.prev on every monomer it copies).
+*/
+scenario TestWithMonomerase {
+	Blank * 1000;
+	Polymerase * 3;
+	Monomerase;
+	chain = Cap;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = End;    chain.next.prev = chain;
 };

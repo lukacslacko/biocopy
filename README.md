@@ -1,114 +1,163 @@
 # BioCopy
 
-A web toy that simulates biomolecules floating in a soup and **self-assembling**:
-monomers jiggle around, bump into each other, and polymerize head-to-tail into
-longer chains. It's a fork of the ball-and-spring look & feel from
+A web toy where biomolecules float in a soup and **assemble themselves by running
+little programs**. Instead of behavior being hardcoded, every ball's *kind*, its
+*bond slots*, and the *actions* it takes are specified in a small text DSL (see
+[`copy.prog`](copy.prog)). The headline behavior is **templated reproduction**: a
+`Polymerase` ball swims to a template chain, reads it monomer by monomer, grabs raw
+material, and builds a copy — which is itself a valid template, so copies beget
+copies. It's a fork of the ball-and-spring look & feel from
 [`knot`](https://github.com/lukacslacko/knot), retuned for molecular self-assembly
-(no gravity, no level-of-detail — molecules don't appear or vanish into nothing).
+(no gravity, no level-of-detail — balls never appear or vanish into nothing).
 
 ## The model
 
-- **Monomers.** Each monomer is a short chain of **5 balls**: `head – body – body –
-  body – tail`. The head and tail are the *reactive ends*; the three body balls
-  carry the monomer's identity. There are **four monomer types**, each with its own
-  body color. All heads share one color, all tails share another — so the palette is
-  one head color + one tail color + four body colors.
-- **Soup.** "Fresh soup" scatters `N` random monomers (random type, random position
-  and orientation) inside the boundary sphere, all initially unbound.
+- **Balls.** Every ball has:
+  - a **kind** — a name like `Blank`, `Cap`, `Info_1`, `Polymerase`. The kind
+    determines the ball's color (a deterministic hash of the name) and, if the kind
+    has a program, its behavior.
+  - **named bond slots** — e.g. a `Polymerase` has `original`, `material`, `copy`;
+    a chain monomer has `next` and `prev`. Bonds are **directed**: a slot points
+    *from* this ball *to* another. A back-link is a separate bond in the other
+    direction (that's why building a doubly linked chain sets both `next` and `prev`).
+  - a **state** register (a name you can set and test), for programs that need a mode.
+  - a **program** — a list of actions the ball runs top to bottom, looping via labels.
+- **Molecules** are whatever the bond graph connects — no longer just chains.
 - **Physics each frame** (a small relaxation sim, several substeps per frame):
-  - **Springs** hold every bond at a rest length (`bond length × interact radius`),
-    so a monomer keeps its shape and bonded balls sit as a smooth bead-worm.
+  - **Springs** hold every bond at a rest length (`bond length × interact radius`).
   - **Collisions** push apart any two balls closer than `2 · interact radius`,
-    *except* the `K` nearest neighbors along the chain. `K` is set to **1** by
-    default (only directly-bonded balls are exempt), which keeps chains extended
-    instead of collapsing.
-  - **Jiggle** is a thermal kick on every ball — this is what keeps the soup mixing
-    so reactive ends keep finding each other. It's **off by default** (turn it up to
-    stir the soup, e.g. so spontaneous binding has something to work with).
-  - **Soft boundary** instead of gravity: a ball that wanders past radius `R`
-    (default 40, up to 80) feels a very slight spring back toward the center.
-    Everything just floats — there is no floor and no "down".
-- **Polymerization.** Once per frame, every **unbound head** touching an **unbound
-  tail** binds with a small, **tunable probability** (the "Bind probability / frame"
-  slider). Binding joins a tail's outgoing bond to a head (`head ← tail`), extending
-  the chain. A head only binds a tail from a *different* molecule, so chains stay
-  open rather than closing into rings. Free ends glow brighter and bulge slightly,
-  so you can always see which sites are still reactive.
-- **Body affinity (chemistry).** A signed slider makes body balls of *different*
-  monomers interact at short range: at a positive setting **like** bodies (same
-  type/color) gently **attract** while **unlike** bodies **repel** when very close;
-  a negative setting reverses it; zero is off. It's evaluated in the same short-range
-  neighbor scan that drives collisions (no global all-pairs cost) and never acts
-  within a single monomer (same-chain is fine) — so you can coax the soup into
-  clusters and structure. This and the bind probability both live under the
-  **Chemistry** panel.
-- **Enzymes.** The Chemistry panel can also seed two kinds of purposeful agents,
-  drawn as larger balls in their own colors, that **interact like a bigger ball**.
-  Each feels a *seek force* toward its current goal but also collides mutually with the
-  soup, so balls push it off course just as it pushes them — it **gives way and flows
-  around clusters** instead of plowing straight through. You set how many of each, plus
-  a shared swim speed, size, and "near bias" (how strongly an enzyme prefers a close
-  target over a far one). Each acts deliberately:
-  - **Monomerase** (amber) — a polymer-cutter. It hunts a *bound* tail (biased toward
-    nearby ones), swims to it, and severs that tail's inter-monomer bond. If the cut
-    monomer's head is itself bound, it retargets the tail feeding that head and keeps
-    chewing *upstream*, so it walks a chain apart monomer by monomer; otherwise it goes
-    back to searching. A roomful of them digests polymers back into free monomers.
-  - **Polymerase** (aqua) — an end-joiner. It grabs a free tail (near bias), carries it
-    to a free head on a *different* molecule (near bias), and binds the two
-    (`head ← tail` — the only bond the model allows), then looks for another pair. A
-    roomful of them assembles the soup into long chains on its own.
+    *except* directly bonded pairs (this is the old "ignore K neighbors" with **K
+    fixed at 1**).
+  - **Jiggle** is an optional thermal kick that keeps the soup mixing (off by default).
+  - **Soft boundary** instead of gravity: a ball past radius `R` feels a slight
+    spring back toward the center. Everything just floats — there is no "down".
+- **Swim-to-bind.** When a program binds a slot to a ball it isn't yet touching, the
+  ball **swims** to it — a steady seek thrust folded into the same physics, so springs
+  and collisions still apply, the soup can shove it off course, and anything it's
+  already holding trails along behind it. On contact, the bond forms.
 
-The **molecules** counter (number of open chains) ticks down and the **bonds**
-counter ticks up as the soup assembles.
+## The DSL
+
+A program is a list of **ball definitions** and **scenarios**. Block comments
+`/* … */` and line comments `//` are ignored. See [`copy.prog`](copy.prog) for a
+complete, commented example (a `Polymerase`, a `Monomerase`, and two scenarios).
+
+### Ball definitions
+
+```c
+ball Blank {};                              // a kind with no slots and no program
+
+ball Info: Chain {                          // `Info` inherits Chain's slots/program
+    next: Info | End;                       // a bond slot; the type list is advisory
+    prev: Cap | Info;                       //   (mismatches are logged, not enforced)
+};
+
+ball Polymerase {
+    original: Chain;
+    material: Blank;
+    copy: Chain;
+    {                                       // the action block = this kind's program
+        start:                              // a label
+        original = Cap;                     // find a nearby Cap, swim to it, bind it
+        material = Blank;
+        material.kind = original.kind;       // change material's kind to original's
+        copy = material;
+        ...
+        if (copy.kind != End) go clone;     // conditional jump
+        ...
+        go start;
+    }
+};
+```
+
+- **Inheritance** (`ball X: Y { … }`) merges Y's slots and program; X's own slots add
+  to / override them, and X's own action block (if present) replaces Y's.
+- A bond slot is `name: KindA | KindB | …;` (an optional `bond` keyword is accepted:
+  `bond chain: End;`). The kind list is recorded for logging but not enforced.
+
+### Actions
+
+| Action | Meaning |
+| --- | --- |
+| `slot = Kind` | Find a nearby ball of `Kind`, swim to it, bind it into `slot`. |
+| `slot = path` | Bind `slot` to a specific ball reached by a bond path (e.g. `original = original.next`). |
+| `owner.slot = …` | Same, but set a slot on another ball (`copy.next = material`). |
+| `slot = release` | Release whatever is bound in `slot`. |
+| `target.kind = NewKind` / `= other.kind` | Change a ball's kind (a literal, or copied from another ball). |
+| `target.state = NewState` / `= other.state` | Change a ball's state. |
+| `label:` … `go label` | Define a jump target / jump to it. |
+| `sleep 5s` / `sleep 200ms` | Pause this program. |
+| `if (a == b) action` / `if (a != b) action` | Run `action` only if the comparison holds (compares `.kind` or `.state`). |
+
+**Paths** start at one of *this ball's* slots and follow bonds: `original` is the
+ball bound in the `original` slot, `original.next` follows that ball's `next` slot,
+and a trailing `.kind`/`.state` reads (or, on the left, writes) that property.
+
+### Scenarios
+
+A scenario is an imperative builder, run once when you start it, with local variables:
+
+```c
+scenario Test {
+    Blank * 1000;                 // create 1000 free Blanks
+    Polymerase;                   // create one Polymerase
+    chain = Cap;                  // create a Cap, remember it as `chain`
+    chain.next = Info_1;          // create an Info_1 and bond chain.next to it
+    chain = chain.next;           // walk the variable forward
+    chain.next = Info_2;
+    ...
+    chain.next = End;
+};
+```
+
+| Statement | Meaning |
+| --- | --- |
+| `Kind * N;` | Create `N` free balls of `Kind`. |
+| `Kind;` | Create one. |
+| `var = Kind;` | Create one and bind it to a variable. |
+| `var.slot = Kind;` | Create one, bond `var.slot` to it. |
+| `var = var.path;` | Move a variable along bonds. |
+| `var.slot = otherVar;` | Bond a slot to an already-created ball (e.g. `chain.next.prev = chain` for a back-link). |
+
+In a scenario a kind name **creates** a ball; in a program a kind name **finds** a
+nearby one — that's the only semantic difference between the two.
+
+> Because bonds are directed, a chain the `Monomerase` will walk *backwards* must be
+> doubly linked. The `TestWithMonomerase` scenario sets each `prev` with
+> `chain.next.prev = chain`, mirroring how the `Polymerase` sets both `copy.next` and
+> `material.prev` on every monomer it copies.
 
 ## Controls
 
+The panel loads `copy.prog`, lists its scenarios, and shows live stats:
+
 | Control | Effect |
 | --- | --- |
-| **Monomers (N)** | How many monomers a fresh soup contains (respawns). |
-| **Bind probability / frame** | Chance a touching unbound head+tail pair binds, per frame. 0 = no polymerization. *(Chemistry panel.)* |
-| **Body affinity (like ↔ unlike)** | Short-range force between bodies of different monomers: + = like-attract/unlike-repel, − = reversed, 0 = off. *(Chemistry panel.)* |
-| **Monomerase enzymes** | How many polymer-cutting enzymes to add. They find a bound tail, cut it, and chew upstream — digesting chains into monomers. *(Chemistry panel.)* |
-| **Polymerase enzymes** | How many end-joining enzymes to add. They carry a free tail to a free head and bind them — building chains. *(Chemistry panel.)* |
-| **Enzyme swim speed / size / near bias** | How fast enzymes move toward a target, how big each enzyme is (× ball radius, render + collision), and how strongly they prefer a nearby target over a far one (0 = uniform). *(Chemistry panel.)* |
-| **Fresh soup** | Scatter a new random soup. |
-| **Render radius** | Drawn ball size only — cosmetic, no effect on the sim. |
+| **Scenario** | Pick a scenario from the loaded program; selecting one (re)spawns it. |
+| **Run scenario** | Respawn the selected scenario. |
+| **Reload program** | Re-fetch and re-parse `copy.prog` (edit the file, click Reload). |
+| **Legend** | One row per kind with its color and a live ball count. |
+| **Render radius** | Drawn ball size only — cosmetic. |
 | **Interact radius** | Drives the sim: collision distance is `2 · interact`. |
-| **Bond length** | Bonded-center rest length (× interact radius); smaller = tighter worm. |
+| **Bond length** | Bonded-center rest length (× interact radius). |
 | **Boundary radius / push** | Radius `R` of the soft containment sphere and how hard balls past it are nudged back. |
-| **Ignore K neighbors** | Chain neighbors exempt from collision (default 1 = directly bonded only). |
 | **Spring / Collision / Damping / Jiggle** | Relaxation tuning. |
 | **Sim substeps / frame** | Physics iterations per rendered frame. |
 | **Pause / Shadows / Bonds / Boundary** | Freeze; toggle self-shadows; draw bond lines; show the boundary sphere. |
 
-**Mouse:** drag empty space to orbit · scroll to zoom · right-drag to pan ·
-**drag a ball** to move its molecule · **click a head or tail** to cut it free from
-its neighbor. A click only cuts the *inter-monomer* bond at that end — a head or
-tail is never severed from its own body, and no ball is ever deleted.
+The **balls / molecules / bonds** counters (molecules = connected components of the
+bond graph) sit in the bottom-left, next to a **GPU**/**CPU** indicator.
 
-**VR (WebXR).** An **Enter VR** button appears wherever the browser exposes immersive
-VR. In VR the soup becomes an arm's-length molecular aquarium floating in front of you;
-point a controller's ray and pull the **trigger** to grab and drag a molecule, or
-squeeze the **grip** to cut a pointed head/tail. Two ways to run it:
+**Mouse:** drag empty space to orbit · scroll to zoom · right-drag to pan.
 
-- **Standalone on a Quest** (Meta Quest Browser): everything runs on the headset.
-  Rendering is fine, but the Quest browser ships no WebGPU by default, so physics falls
-  back to the CPU — keep the soup modest.
-- **PCVR on Windows** (Quest Link over USB‑C, or Air Link): open the page in desktop
-  Chrome/Edge with the Meta Quest Link app running and the headset connected. The PC's
-  GPU does *both* the WebGPU physics and the rendering, and Quest Link only presents the
-  finished frames to the headset — so the powerful PC GPU does the heavy lifting and you
-  can push far higher ball counts. This is the high-performance path.
-
-The button is hidden where immersive VR isn't available — including on **macOS**, where
-tethered PCVR to a Quest isn't possible (Meta's Quest Link is Windows‑only and
-SteamVR‑on‑Mac is discontinued), so a Mac stays a (very capable) desktop renderer.
+Swim speed, target-picking bias, and bind distance are currently code constants;
+they'll move into the programs themselves later.
 
 ## Run it
 
-A single self-contained file — no build step. Three.js loads from a CDN, so you just
-need a static server (and an internet connection on first load):
+A single self-contained file — no build step. Three.js loads from a CDN, and the page
+fetches `copy.prog` at startup, so serve it over a static server (with an internet
+connection on first load):
 
 ```sh
 python3 -m http.server 8000
@@ -116,55 +165,38 @@ python3 -m http.server 8000
 ```
 
 Any static server works (`npx serve`, etc.). A WebGPU-capable browser is recommended
-for large soups — the physics then runs on the GPU (see implementation notes).
+for large scenarios — the physics then runs on the GPU. (Opening the file directly
+over `file://` also works: `fetch` is blocked there, so it falls back to an embedded
+copy of the program.)
 
 ## Implementation notes
 
-- **Rendering** uses one `THREE.InstancedMesh`, so all balls draw in a single call,
-  lit by a key/fill/rim rig with ACES tone mapping against a grey backdrop.
-- **Connectivity** is stored as per-ball `next`/`prev` links (a linear chain), so
-  binding and cutting are just pointer edits and any ball index stays valid for the
-  life of a soup. Springs follow bonds; collisions use a spatial-hash broad phase.
-  Body affinity rides that same broad phase — when it's on, the grid cell is widened
-  to the affinity range so one neighbor scan feeds both collisions and affinity — and
-  a per-ball monomer id lets it cheaply skip same-monomer pairs.
-- **GPU acceleration (WebGPU).** When the browser exposes WebGPU, the entire
-  per-substep physics — springs along bonds, a uniform-grid collision broad phase
-  (atomic binning) with the K-neighbor skip, body affinity, jiggle, the soft
-  boundary, and the integrate — runs in a compute shader on the GPU. Positions are
-  read back each frame to drive the instanced rendering; polymerization and cutting
-  run on the CPU and re-upload only the changed bonds (a ball's index never moves, so
-  the per-ball kind/type/monomer attributes upload once per soup). This lifts the
-  ceiling to tens of thousands of balls — the **Monomers** slider opens up to 6000
-  (30000 balls) when the GPU is active. If WebGPU is missing or fails, it falls back
-  to the CPU physics with the same behavior. The stats line shows **GPU** or **CPU**
-  so you can tell which path is running.
-- **Enzymes.** Enzymes live *outside* the monomer ball arrays — their own positions
-  and a second `InstancedMesh` — so the GPU/CPU physics core never changes. A small
-  CPU state machine runs each frame against the freshly read-back position mirror:
-  it picks targets (a near-biased weighted-random pick over eligible ends), then moves
-  as a small damped body — a seek force toward the goal (it aims at the closest point one
-  enzyme-radius out from the target ball, so it docks *alongside* it rather than burying
-  in) plus mutual repulsion from any ball it overlaps (each yields half the overlap, so
-  the soup deflects it). It edits
-  only what it touches — the bond pointers (cut/bind, the same edits as manual
-  cutting/polymerization) and the handful of balls it carries or jostles. On the GPU
-  path those touched balls are re-uploaded individually (the set is tiny), so enzymes
-  add no per-ball GPU work. The target's and carried strand's own monomer are exempt
-  from the collision, so docking and carrying never fight the enzyme's own motion.
-- **WebXR / VR.** All visuals live in a `simGroup` that the desktop leaves at identity
-  and VR shrinks/places in front of the viewer. The loop runs on
-  `renderer.setAnimationLoop`, and **rendering is decoupled from physics**: every XR
-  frame renders from the latest positions while a physics step (including the async GPU
-  position readback) runs fire-and-forget, so head tracking stays smooth even if a step
-  hitches — positions just trail by a frame or two under load. Controllers raycast the
-  instanced balls for grab/cut, reusing the same pin constraint as the mouse drag. The
-  Enter-VR button is added only when `navigator.xr` reports `immersive-vr` is supported,
-  so non-headset browsers are untouched.
-- A `window.__dbg` handle (positions, counts, simulated cut/drag) is exposed for
-  automated testing; it has no effect on behavior.
-
 Everything lives in [`index.html`](index.html).
+
+- **Parser.** A small tokenizer + recursive-descent parser compiles `copy.prog` into a
+  kind table (names, merged-with-inheritance bond slots, and a per-kind instruction
+  list) and a set of scenario builders. Bond-slot *names* are global, so changing a
+  ball's kind doesn't disturb its bonds.
+- **Two views of a bond.** The VM navigates **directed** slots (`bond[]`), while the
+  physics uses an **undirected adjacency** (`nbr[]`). A physical bond a–b exists if
+  *either* ball references the other, so a one-directional bond (enzyme→substrate)
+  still springs symmetrically — and collisions skip directly-bonded pairs.
+- **The VM** runs each ball whose kind has a program: it executes actions until it hits
+  a blocking one (a swim-to-bind, or a sleep), nudging a `seekTarget` the physics reads
+  as a thrust. Binding/releasing edit the directed slots and recompute the two balls'
+  adjacency; changing a kind just recolors and (re)starts a program if the new kind has
+  one.
+- **Rendering** uses one `THREE.InstancedMesh` (a single draw call), colored per ball
+  by `hash(kindName) → HSL`, lit by a key/fill/rim rig with ACES tone mapping.
+- **GPU acceleration (WebGPU).** When available, the whole per-substep physics —
+  springs along the adjacency, a uniform-grid collision broad phase (atomic binning)
+  that skips bonded pairs, the seek thrust, jiggle, the soft boundary, and the
+  integrate — runs in a compute shader. Positions are read back each frame to drive
+  rendering and the VM; the VM (on the CPU) re-uploads only the changed adjacency and
+  seek targets. If WebGPU is missing or fails it falls back to identical CPU physics;
+  the stats line shows which path is running.
+- A `window.__dbg` handle (positions, kinds, bonds, counts, a single-frame `tick()`)
+  is exposed for automated testing; it has no effect on behavior.
 
 ## License
 
