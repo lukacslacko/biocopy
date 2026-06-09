@@ -1069,18 +1069,19 @@ function execInstr(self, l, ins, now) {
     case 'bind': {
       const owner = resolvePath(self, ins.owner);
       if (owner < 0) { logOnce(`${kindList[kindId[self]]}: bind on missing owner`); return 'next'; }
-      let T, wantKind = -1;
-      if (ins.rhs.type === 'kindFind') {
-        wantKind = ins.rhs.kindId;
-        const subs = kindSubtypes[wantKind];       // the kind and all its descendants
-        T = findNearest(pos[self * 3], pos[self * 3 + 1], pos[self * 3 + 2],
-          i => i !== owner && subs.has(kindId[i]) && bond[owner * MAX_SLOTS + ins.slot] !== i);
-        if (T < 0) { findMiss[idx] = 1; return 'retry'; }   // none of that kind exists/free — keep retrying
-        findMiss[idx] = 0;
-      } else {
-        T = resolvePath(self, ins.rhs.segs);
+      // Reference bind (`copy.next = material`, `original = original.next`, …): the target
+      // is reached via the agent's own bonds, so it's already part of its structure — just
+      // wire it, no swimming. Only by-kind binds acquire a ball from the soup and swim.
+      if (ins.rhs.type !== 'kindFind') {
+        const T = resolvePath(self, ins.rhs.segs);
         if (T < 0) { logOnce(`${kindList[kindId[self]]}: bind ref resolved to nothing`); return 'next'; }
+        setBond(owner, ins.slot, T); return 'next';
       }
+      const wantKind = ins.rhs.kindId, subs = kindSubtypes[wantKind];   // the kind and all its descendants
+      const T = findNearest(pos[self * 3], pos[self * 3 + 1], pos[self * 3 + 2],
+        i => i !== owner && subs.has(kindId[i]) && bond[owner * MAX_SLOTS + ins.slot] !== i);
+      if (T < 0) { findMiss[idx] = 1; return 'retry'; }   // none of that kind exists/free — keep retrying
+      findMiss[idx] = 0;
       const bd = bindDist();
       if (dist2(owner, T) <= bd * bd) { setBond(owner, ins.slot, T); return 'next'; }
       // too far → swim there, bind on arrival

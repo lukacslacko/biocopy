@@ -112,7 +112,7 @@ ball Polymerase {
 	material: Blank;
 	copy: Chain;
 
-	repel Polymerase 8;
+	repel Polymerase 10;
 	speed 1;
 
 	{
@@ -148,7 +148,7 @@ ball Monomerase {
 	next: Chain;
 	
 	speed 0.1;
-	repel Polymerase 5;
+	repel Polymerase 8;
 	retarget_after 5s;
 
 	{

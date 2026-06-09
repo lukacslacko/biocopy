@@ -31,10 +31,14 @@ copies. It's a fork of the ball-and-spring look & feel from
   - **Jiggle** is an optional thermal kick that keeps the soup mixing (off by default).
   - **Soft boundary** instead of gravity: a ball past radius `R` feels a slight
     spring back toward the center. Everything just floats — there is no "down".
-- **Swim-to-bind.** When a program binds a slot to a ball it isn't yet touching, the
-  ball **swims** to it — a steady seek thrust folded into the same physics, so springs
-  and collisions still apply, the soup can shove it off course, and anything it's
-  already holding trails along behind it. On contact, the bond forms.
+- **Swim-to-bind vs. wire-up.** A **by-kind** bind (`slot = Kind`) *acquires* a ball
+  from the soup: the agent **swims** toward the nearest one — a steady seek thrust
+  folded into the same physics, so springs and collisions still apply, the soup can
+  shove it off course, and anything it's already holding trails along — and the bond
+  forms on contact. A **reference** bind (`copy.next = material`, `original =
+  original.next`, …) targets a ball reached through the agent's own bonds, which is
+  already part of its structure, so the bond is just **wired up directly** (no
+  swimming).
 
 ## The DSL
 
@@ -109,8 +113,8 @@ ball Polymerase {
 | Action | Meaning |
 | --- | --- |
 | `slot = Kind` | Find a nearby ball of `Kind`, swim to it, bind it into `slot`. |
-| `slot = path` | Bind `slot` to a specific ball reached by a bond path (e.g. `original = original.next`). |
-| `owner.slot = …` | Same, but set a slot on another ball (`copy.next = material`). |
+| `slot = path` | Bind `slot` to a specific ball reached by a bond path (e.g. `original = original.next`) — wired directly, no swim. |
+| `owner.slot = …` | Same, but set a slot on another ball (`copy.next = material`) — wired directly. |
 | `slot = release` | Release whatever is bound in `slot`. |
 | `target.kind = NewKind` / `= other.kind` | Change a ball's kind (a literal, or copied from another ball). |
 | `target.state = NewState` / `= other.state` | Change a ball's state. |
