@@ -117,8 +117,7 @@ ball Polymerase {
 
 	{
 		original = Cap;
-		material = Blank;
-		material.kind = original.kind;
+		material = Cap;
 		copy = material;
 		
 		clone:
@@ -137,10 +136,6 @@ ball Polymerase {
 		if (copy.kind != End) copy.kind = End;
 		copy = release;
 	};
-
-	0.001 {
-		drift 0.1s;
-	}
 };
 
 ball Monomerase {
@@ -152,26 +147,11 @@ ball Monomerase {
 	retarget_after 5s;
 
 	{
-		sleep 3s;
-		chain = Cap;
-		
-		digest:
 		sleep 1s;
+		if (!chain.next) chain = Cap;
 		next = chain.next;
-		chain.next = release;
-		next.prev = release;
-		chain.kind = Blank;
+		replace chain with chain.kind;
 		chain = next;
-		if (chain.kind != End) go digest;
-
-		chain.kind = Blank;
-		chain = release;
-		next.kind = Blank;
-		next = release;
-	};
-
-	0.05 {
-		drift 1s;
 	};
 };
 

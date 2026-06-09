@@ -703,6 +703,16 @@ function parseProgram(src, srcName) {
         eatSemi(); return { op, msLo, msHi };
       }
       if (atA('if')) { q++; expectA('('); const cond = parseCond(); expectA(')'); const inner = parseOne(); return { op: 'if', cond, inner }; }
+      // `replace <path> with <Kind>;` — turn the ball at <path> into a brand-new <Kind>,
+      // severing every bond it had, then re-bind it through <path> (and nothing else).
+      if (atA('replace')) {
+        q++;
+        const path = parseDotted();
+        expectA('with');
+        const value = parseKindVal();   // a kind literal (`Blank`) or a `.kind` path (`chain.kind`)
+        eatSemi();
+        return { op: 'replace', owner: segs(path.slice(0, -1)), slot: getSlot(path[path.length - 1]), value };
+      }
       const lhs = parseDotted(); expectA('=');
       const last = lhs[lhs.length - 1];
       if (last === 'kind') { const target = segs(lhs.slice(0, -1)); const value = parseKindVal(); eatSemi(); return { op: 'setkind', target, value }; }
@@ -899,6 +909,25 @@ function haltVM(i) {
   for (let l = 0; l < MAX_LISTS; l++) { pc[i * MAX_LISTS + l] = -1; vmStatus[i * MAX_LISTS + l] = VM_RUN; }
   seekTarget[i] = -1; inActive[i] = 0;
 }
+// Wipe a ball's runtime state and re-stamp it with a fresh kind + program. Used by
+// `replace`: the array slot is reused (no ball appears/vanishes), but every trace of
+// the old ball — bonds are cut by the caller; state, drift, and per-list VM pointers
+// are reset here — is gone, so it behaves as a brand-new ball of `kid`.
+function rebornBall(i, kid) {
+  stateId[i] = 0;
+  seekTarget[i] = -1;
+  driftUntil[i] = 0; driftDir[i * 3] = driftDir[i * 3 + 1] = driftDir[i * 3 + 2] = 0; driftDirty = true;
+  for (let l = 0; l < MAX_LISTS; l++) {
+    const idx = i * MAX_LISTS + l;
+    pc[idx] = -1; vmStatus[idx] = VM_RUN; vmSleepUntil[idx] = 0;
+    bindOwner[idx] = -1; bindSlot[idx] = -1; bindTarget[idx] = -1; bindWantKind[idx] = -1;
+    drifting[idx] = 0; swimSince[idx] = 0; findMiss[idx] = 0;
+  }
+  kindId[i] = kid; colorsDirty = true; statsDirty = true; kindDirtyForGPU = true; actionHappened = true;
+  const def = kinds.get(kindList[kid]);
+  if (def && def.programs.length) initVM(i);     // (re)activate under the new program
+  else if (inActive[i]) haltVM(i);               // new kind is inert
+}
 
 // ---------------------------------------------------------------------------
 // Scenario spawning
@@ -1074,6 +1103,26 @@ function execInstr(self, l, ins, now) {
       const owner = resolvePath(self, ins.owner);
       if (owner < 0) return 'next';
       releaseBond(owner, ins.slot); return 'next';
+    }
+    case 'replace': {
+      const owner = resolvePath(self, ins.owner);
+      if (owner < 0) { logOnce(`${kindList[kindId[self]]}: replace on missing owner`); return 'next'; }
+      const O = bond[owner * MAX_SLOTS + ins.slot];
+      if (O < 0) { logOnce(`${kindList[kindId[self]]}: replace found nothing in the slot`); return 'next'; }
+      // The new kind: a literal, or read from a ball via a `.kind` path (e.g. `chain.kind`
+      // keeps the same kind while severing the bonds). Resolve it before anything is wiped.
+      let kid;
+      if (ins.value.type === 'kindLit') kid = ins.value.kindId;
+      else { const r = resolvePath(self, ins.value.segs); if (r < 0) { logOnce(`${kindList[kindId[self]]}: replace kind ref resolved to nothing`); return 'next'; } kid = kindId[r]; }
+      // Sever every bond touching the old ball, both directions. A bond always records
+      // both endpoints in nbr[], so every partner is in O's neighbor list — that's all we scan.
+      const partners = [];
+      for (let k = 0; k < MAX_NBR; k++) { const v = nbr[O * MAX_NBR + k]; if (v >= 0) partners.push(v); }
+      for (let s = 0; s < MAX_SLOTS; s++) if (bond[O * MAX_SLOTS + s] >= 0) releaseBond(O, s);             // outgoing from O
+      for (const B of partners) for (let s = 0; s < MAX_SLOTS; s++) if (bond[B * MAX_SLOTS + s] === O) releaseBond(B, s);  // incoming to O
+      rebornBall(O, kid);                      // reincarnate the now-detached ball as a fresh <Kind>
+      setBond(owner, ins.slot, O);             // ...bound only through the path that named it
+      return 'next';
     }
     case 'bind': {
       const owner = resolvePath(self, ins.owner);

@@ -118,6 +118,7 @@ ball Polymerase {
 | `slot = release` | Release whatever is bound in `slot`. |
 | `target.kind = NewKind` / `= other.kind` | Change a ball's kind (a literal, or copied from another ball). |
 | `target.state = NewState` / `= other.state` | Change a ball's state. |
+| `replace path with Kind` / `= other.kind` | Destroy the ball at `path` and put a brand-new ball in its place: every bond it had (in or out) is cut, then the fresh ball is re-bound through `path` and nothing else. The new kind is a literal (`replace input with Blank`) or read from a ball (`replace chain with chain.kind` keeps the same kind while severing every bond — a quick "disconnect this ball"). `replace ligand.foo with Enzyme` swaps the ball in `ligand`'s `foo` slot. |
 | `label:` … `go label` | Define a jump target / jump to it. |
 | `sleep 5s` / `sleep 200ms` | Pause this program. |
 | `if (a == b) action` / `if (a != b) action` | Run `action` only if the comparison holds (compares `.kind` or `.state`). |
@@ -133,6 +134,15 @@ write is a no-op; and an *assignment* of that reference **clears the slot** —
 nothing"). This lets a walker fall off the end of a chain and stop cleanly: after
 the failed advance the slot is empty, so the next `if (slot.kind != End)` is false
 and the loop exits instead of spinning on a stale ball.
+
+**Replacing balls.** `replace path with Kind` is the clean way to atomically tear a
+ball out of whatever it was attached to and drop a fresh one in. The old ball's
+identity is gone — its kind, state, running program, and *all* of its bonds (both
+directions) are wiped — and a brand-new `Kind` ball, holding only the `path` bond,
+takes its place. (Under the hood it reuses the same array slot rather than allocating
+a new ball and orphaning the old one, so the total ball count is conserved and the
+"balls never appear or vanish" invariant holds; from a program's point of view it is
+indistinguishable from a freshly minted ball.)
 
 ### Scenarios
 

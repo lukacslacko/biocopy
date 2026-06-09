@@ -1,0 +1,44 @@
+ball Blank {};
+
+ball Chain {};
+
+ball Cap: Chain {
+	next: Info;
+};
+
+ball CapSynthesizer {
+	input: Blank;
+	speed 0.05;
+	retarget_after 20s;
+
+	{
+		drift 5s;
+		input = Blank;
+		input.kind = Cap;
+	}
+};
+
+ball CapDigester {
+	input: Cap;
+	speed 0.02;
+	retarget_after 60s;
+
+	{
+		start:
+		drift 5s;
+		input = Cap;
+
+		// Only digest standalone parts (don't tear chains apart).
+		if (input.next) go start;
+
+		// Turn the Cap into a brand-new Blank: a fresh ball bound through `input`,
+		// with every bond the old ball had automatically cut.
+		replace input with Blank;
+	}
+};
+
+scenario Test {
+	Blank * 1000;
+	CapSynthesizer;
+	CapDigester;
+};
