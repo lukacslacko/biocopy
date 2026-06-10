@@ -114,6 +114,7 @@ ball Polymerase {
 
 	repel Polymerase 10;
 	speed 1;
+	retarget_after 4s;
 
 	{
 		material = release;
@@ -148,13 +149,13 @@ ball Monomerase {
 };
 
 scenario Test {
-	Cap * 20;
-	End * 20;
-	Info_1 * 100;
-	Info_2 * 100;
-	Info_3 * 100;
-	Polymerase;
-	Monomerase;
+	Cap * 100;
+	End * 100;
+	Info_1 * 500;
+	Info_2 * 500;
+	Info_3 * 500;
+	Polymerase * 5;
+	Monomerase * 2;
 	chain = Cap;
 	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
 	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
