@@ -202,14 +202,16 @@ The panel loads `copy.prog`, lists its scenarios, and shows live stats:
 | **Scenario** | Pick a scenario from the loaded program; selecting one (re)spawns it. |
 | **Run scenario** | Respawn the selected scenario. |
 | **Reload program** | Re-fetch and re-parse the currently selected program (edit the file, click Reload). |
-| **Legend** | One row per kind with its color and a live ball count. Hover a row to highlight those balls (rainbow + double size) and pop up an **activity tooltip**: actions executed and actions/second/ball, both since start and over the last minute. Totals and rates aggregate the kind plus its descendants (matching the count). |
+| **Legend** | One row per kind with its color and a live ball count. Hover a row to highlight those balls (rainbow + double size) and pop up an **activity tooltip**: actions executed and actions/second/ball (both since start and over the last minute), plus a **sparkline** of the kind's count over the last 5 minutes with two overlaid lines — total, and how many of them are bonded. Totals/rates/plots aggregate the kind plus its descendants (matching the count). |
+| **Stats** | Open an interactive activity dashboard over the running sim. Pick a **time horizon** (1 min / 5 min / 15 min / all time / custom seconds), a **metric** (count — total & bonded — or actions/minute), and tick any set of **kinds** to overlay them on one plot. |
 | **Render radius** | Drawn ball size only — cosmetic. |
 | **Interact radius** | Drives the sim: collision distance is `2 · interact`. |
 | **Bond length** | Bonded-center rest length (× interact radius). |
 | **Boundary radius / push** | Radius `R` of the soft containment sphere and how hard balls past it are nudged back. |
 | **Spring / Collision / Damping / Jiggle** | Relaxation tuning. |
 | **Sim substeps / frame** | Physics iterations per rendered frame. |
-| **Pause / Shadows / Bonds / Boundary** | Freeze; toggle self-shadows; draw bond lines; show the boundary sphere. |
+| **Pause / Next** | Freeze; or step until some ball acts, then pause. |
+| **Shadows / Bonds / Boundary** | Toggle self-shadows; draw bond lines; show the boundary sphere. |
 
 The **balls / molecules / bonds** counters (molecules = connected components of the
 bond graph) sit in the bottom-left, next to a **GPU**/**CPU** indicator.

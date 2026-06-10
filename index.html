@@ -159,6 +159,36 @@
   #kindTip .hdr { color: var(--ink); font-weight: 650; margin-bottom: 5px; }
   #kindTip .k { color: var(--accent); }
   #kindTip b { color: var(--ink); font-weight: 600; }
+  #kindTip .plot { margin-top: 6px; background: rgba(255,255,255,0.03); border-radius: 5px; padding: 2px; }
+  #kindTip .tp-leg, #statsPanel .sp-legend { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; align-items: center; }
+  #kindTip .tp-leg span, #statsPanel .sp-legend span { display: inline-flex; align-items: center; gap: 4px; }
+  #kindTip .tp-leg i, #statsPanel .sp-legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+  #kindTip .tp-leg .dim { color: var(--ink-dim); opacity: .7; }
+
+  /* Stats panel: an interactive activity dashboard over the running sim. */
+  #statsPanel {
+    position: fixed; z-index: 70; right: 16px; top: 16px; width: 420px; display: none;
+    background: rgba(12, 14, 20, 0.97);
+    border: 1px solid var(--panel-border); border-radius: 12px;
+    box-shadow: 0 16px 48px rgba(0,0,0,.6);
+    font: 12px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: var(--ink-dim);
+  }
+  #statsPanel .sp-hdr { display: flex; justify-content: space-between; align-items: center;
+    padding: 9px 12px; border-bottom: 1px solid var(--panel-border); color: var(--ink); font-weight: 650; }
+  #statsPanel .sp-hdr button { background: none; border: none; color: var(--ink-dim); font-size: 18px; cursor: pointer; line-height: 1; padding: 0 2px; }
+  #statsPanel .sp-hdr button:hover { color: var(--ink); }
+  #statsPanel .sp-body { padding: 10px 12px; }
+  #statsPanel .sp-ctrls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+  #statsPanel .sp-ctrls label { display: inline-flex; gap: 5px; align-items: center; color: var(--ink-dim); }
+  #statsPanel select, #statsPanel input[type=number] {
+    background: var(--panel); color: var(--ink); border: 1px solid var(--panel-border);
+    border-radius: 6px; padding: 3px 6px; font: inherit; }
+  #statsPanel .sp-kinds { display: flex; gap: 8px 12px; flex-wrap: wrap; margin-bottom: 8px; max-height: 84px; overflow-y: auto; }
+  #statsPanel .sp-kinds label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+  #statsPanel .sp-kinds i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+  #statsPanel .sp-plot { position: relative; background: rgba(255,255,255,0.03); border-radius: 6px; padding: 4px; }
+  #statsPanel .sp-ymax { position: absolute; top: 4px; left: 6px; color: var(--ink-dim); opacity: .7; font-variant-numeric: tabular-nums; }
+  #statsPanel .sp-xspan { text-align: right; color: var(--ink-dim); opacity: .7; margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -190,6 +220,7 @@
   <div class="buttons">
     <button id="pause" class="secondary">Pause</button>
     <button id="next" class="secondary">Next</button>
+    <button id="stats" class="secondary">Stats</button>
   </div>
 
   <div class="toggles">
@@ -261,6 +292,33 @@
 <div id="hint"><span class="hint-dim">drag empty space to orbit · scroll to zoom · right-drag to pan · hold <b>D</b> over a ball to inspect</span></div>
 <div id="dbg"></div>
 <div id="kindTip"></div>
+
+<div id="statsPanel">
+  <div class="sp-hdr"><span>Activity stats</span><button id="spClose" title="Close">×</button></div>
+  <div class="sp-body">
+    <div class="sp-ctrls">
+      <label>Horizon
+        <select id="spHorizon">
+          <option value="60">last 1 min</option>
+          <option value="300" selected>last 5 min</option>
+          <option value="900">last 15 min</option>
+          <option value="0">all time</option>
+          <option value="-1">custom…</option>
+        </select>
+      </label>
+      <label id="spCustomWrap" style="display:none">secs <input id="spCustom" type="number" min="5" step="5" value="120" /></label>
+      <label>Metric
+        <select id="spMetric">
+          <option value="count" selected>count (total &amp; bonded)</option>
+          <option value="actions">actions / min</option>
+        </select>
+      </label>
+    </div>
+    <div class="sp-kinds" id="spKinds"></div>
+    <div class="sp-plot" id="spPlot"></div>
+    <div class="sp-legend" id="spLegend"></div>
+  </div>
+</div>
 
 <script type="importmap">
 {
@@ -461,14 +519,75 @@ const STAT_NB = 60;
 const actTotal = new Float64Array(MAX_KINDS);
 const actRing = new Float64Array(MAX_KINDS * STAT_NB);
 let statsElapsedMs = 0, statsLastNow = -1, statsCurSec = 0, statsBucket = 0;
-function resetStats() { actTotal.fill(0); actRing.fill(0); statsElapsedMs = 0; statsLastNow = -1; statsCurSec = 0; statsBucket = 0; }
+
+// Per-second time-series history (ring buffer, ~1 hour) for the activity plots:
+// for each kind, the total count, the count with ≥1 bond, and cumulative actions.
+const HIST_CAP = 3600;
+const histTotal = new Float32Array(HIST_CAP * MAX_KINDS);
+const histBonded = new Float32Array(HIST_CAP * MAX_KINDS);
+const histActions = new Float32Array(HIST_CAP * MAX_KINDS);
+let histHead = 0, histLen = 0;   // ring write position; number of valid samples
+
+function resetStats() {
+  actTotal.fill(0); actRing.fill(0);
+  statsElapsedMs = 0; statsLastNow = -1; statsCurSec = 0; statsBucket = 0;
+  histTotal.fill(0); histBonded.fill(0); histActions.fill(0); histHead = 0; histLen = 0;
+}
 function recordAction(k) { actTotal[k]++; actRing[k * STAT_NB + statsBucket]++; }
+function sampleHistory() {                          // snapshot the current per-kind counts + cumulative actions
+  const base = histHead * MAX_KINDS;
+  for (let k = 0; k < MAX_KINDS; k++) { histTotal[base + k] = 0; histBonded[base + k] = 0; }
+  for (let i = 0; i < ballCount; i++) { const k = kindId[i]; histTotal[base + k]++; if (hasAnyBond(i)) histBonded[base + k]++; }
+  for (let k = 0; k < MAX_KINDS; k++) histActions[base + k] = actTotal[k];
+  histHead = (histHead + 1) % HIST_CAP;
+  if (histLen < HIST_CAP) histLen++;
+}
 function advanceStats(now) {                       // call once per running frame
   if (statsLastNow >= 0) { let d = now - statsLastNow; if (d < 0) d = 0; else if (d > 250) d = 250; statsElapsedMs += d; }
   statsLastNow = now;
   const sec = Math.floor(statsElapsedMs / 1000);
-  while (statsCurSec < sec) { statsCurSec++; const b = statsCurSec % STAT_NB; for (let k = 0; k < MAX_KINDS; k++) actRing[k * STAT_NB + b] = 0; }
+  while (statsCurSec < sec) {                       // one tick per elapsed sim-second
+    statsCurSec++;
+    const b = statsCurSec % STAT_NB; for (let k = 0; k < MAX_KINDS; k++) actRing[k * STAT_NB + b] = 0;
+    sampleHistory();
+  }
   statsBucket = statsCurSec % STAT_NB;
+}
+// A kind's (descendant-inclusive) value series for the most recent `nSamples`, oldest→newest.
+function histKindSeries(k, src, nSamples) {
+  const subs = kindSubtypes[k];
+  const m = Math.min(nSamples, histLen);
+  const out = new Array(m);
+  for (let s = 0; s < m; s++) {
+    const idx = (histHead - m + s + HIST_CAP * 2) % HIST_CAP, base = idx * MAX_KINDS;
+    let v = 0; for (const j of subs) v += src[base + j];
+    out[s] = v;
+  }
+  return out;
+}
+// Per-interval deltas of a cumulative series, scaled (e.g. ×60 for per-minute).
+function diffSeries(arr, scale) {
+  const out = new Array(arr.length);
+  if (arr.length) out[0] = 0;
+  for (let i = 1; i < arr.length; i++) { const d = arr[i] - arr[i - 1]; out[i] = (d > 0 ? d : 0) * scale; }
+  return out;
+}
+// Render a set of {values, color} series as an overlaid SVG line plot. Returns {svg, maxY}.
+function plotSVG(series, w, h) {
+  let maxY = 0, n = 0;
+  for (const s of series) { if (s.values.length > n) n = s.values.length; for (const v of s.values) if (v > maxY) maxY = v; }
+  if (maxY <= 0) maxY = 1;
+  if (n < 1) n = 1;
+  const X = i => (n <= 1 ? 0 : (i / (n - 1)) * (w - 1));
+  const Y = v => (h - 1.5 - (v / maxY) * (h - 3));
+  let lines = '';
+  for (const s of series) {
+    if (!s.values.length) continue;
+    let pts = '';
+    for (let i = 0; i < s.values.length; i++) pts += X(i).toFixed(1) + ',' + Y(s.values[i]).toFixed(1) + ' ';
+    lines += `<polyline fill="none" stroke="${s.color}" stroke-width="1.5" points="${pts.trim()}"/>`;
+  }
+  return { svg: `<svg width="${w}" height="${h}" style="display:block">${lines}</svg>`, maxY };
 }
 const drifting = new Uint8Array(MAX_BALLS * MAX_LISTS);   // 1 while this list's `drift` is running
 const swimSince = new Float64Array(MAX_BALLS * MAX_LISTS); // time the current swim began (for the stuck timeout)
@@ -1551,10 +1670,71 @@ function updateKindTip() {
   const rateAll = nBalls > 0 ? total / elapsed / nBalls : 0;
   const rateMin = nBalls > 0 ? lastMin / windowSec / nBalls : 0;
   const num = n => Math.round(n).toLocaleString('en-US');
+  // Sparkline: total count vs. bonded count over the last 5 minutes.
+  const col = '#' + kindColor(kindList[k]).getHexString();
+  const tot = histKindSeries(k, histTotal, 300), bon = histKindSeries(k, histBonded, 300);
+  const { svg, maxY } = plotSVG([{ values: tot, color: col }, { values: bon, color: '#e6edf3' }], 212, 40);
   kindTipEl.innerHTML =
     `<div class="hdr"><span class="k">${kindList[k]}</span> · ${nBalls} ball${nBalls === 1 ? '' : 's'}</div>` +
     `<div>all time — <b>${num(total)}</b> actions · <b>${rateAll.toFixed(2)}</b> /s/ball</div>` +
-    `<div>last ${Math.round(windowSec)}s — <b>${num(lastMin)}</b> actions · <b>${rateMin.toFixed(2)}</b> /s/ball</div>`;
+    `<div>last ${Math.round(windowSec)}s — <b>${num(lastMin)}</b> actions · <b>${rateMin.toFixed(2)}</b> /s/ball</div>` +
+    `<div class="plot">${svg}</div>` +
+    `<div class="tp-leg"><span><i style="background:${col}"></i>total</span><span><i style="background:#e6edf3"></i>bonded</span><span class="dim">peak ${num(maxY)} · last 5 min</span></div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Stats panel: an interactive activity dashboard (horizon + metric + multi-kind).
+// ---------------------------------------------------------------------------
+let statsOpen = false, spHorizonSec = 300, spMetric = 'count';
+const spSelKinds = new Set();
+const statsPanelEl = document.getElementById('statsPanel');
+const spPlotEl = document.getElementById('spPlot');
+const spLegendEl = document.getElementById('spLegend');
+const spKindsEl = document.getElementById('spKinds');
+
+function buildStatsKinds() {                        // a colored checkbox per kind; default-select the agents (program kinds)
+  if (!spKindsEl) return;
+  spKindsEl.innerHTML = '';
+  spSelKinds.clear();
+  const cbs = [];
+  for (let k = 0; k < kindList.length; k++) {
+    const name = kindList[k];
+    const d = kinds.get(name); const hasProg = !!(d && d.programs.length);
+    const lab = document.createElement('label');
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = hasProg;
+    if (hasProg) spSelKinds.add(k);
+    const sw = document.createElement('i'); sw.style.background = '#' + kindColor(name).getHexString();
+    const tx = document.createElement('span'); tx.textContent = name;
+    cb.addEventListener('change', () => { if (cb.checked) spSelKinds.add(k); else spSelKinds.delete(k); updateStatsPanel(); });
+    lab.appendChild(cb); lab.appendChild(sw); lab.appendChild(tx);
+    spKindsEl.appendChild(lab); cbs.push(cb);
+  }
+  if (!spSelKinds.size && cbs.length) { spSelKinds.add(0); cbs[0].checked = true; }   // fall back to the first kind
+}
+
+function updateStatsPanel() {
+  if (!statsOpen || !spPlotEl) return;
+  const nSamples = spHorizonSec <= 0 ? histLen : Math.min(histLen, spHorizonSec);
+  const sel = [...spSelKinds].filter(k => k < kindList.length);
+  const series = [], legend = [], colOf = k => '#' + kindColor(kindList[k]).getHexString();
+  if (spMetric === 'count') {
+    if (sel.length === 1) {                          // single kind → total + of-which-bonded
+      const k = sel[0], c = colOf(k);
+      series.push({ values: histKindSeries(k, histTotal, nSamples), color: c });
+      series.push({ values: histKindSeries(k, histBonded, nSamples), color: '#e6edf3' });
+      legend.push({ color: c, label: kindList[k] + ' total' }, { color: '#e6edf3', label: 'bonded' });
+    } else for (const k of sel) {                    // multiple kinds → one total line each
+      const c = colOf(k); series.push({ values: histKindSeries(k, histTotal, nSamples), color: c }); legend.push({ color: c, label: kindList[k] });
+    }
+  } else {                                           // actions / min
+    for (const k of sel) { const c = colOf(k); series.push({ values: diffSeries(histKindSeries(k, histActions, nSamples), 60), color: c }); legend.push({ color: c, label: kindList[k] }); }
+  }
+  const { svg, maxY } = plotSVG(series, 392, 150);
+  const fmtY = maxY >= 10 ? Math.round(maxY).toLocaleString('en-US') : maxY.toFixed(1);
+  const span = spHorizonSec <= 0 ? `all (${nSamples}s)` : (spHorizonSec >= 60 ? `${(spHorizonSec / 60).toFixed(spHorizonSec % 60 ? 1 : 0)} min` : `${spHorizonSec}s`);
+  spPlotEl.innerHTML = `<div class="sp-ymax">${fmtY}</div>${svg}`;
+  spLegendEl.innerHTML = legend.map(l => `<span><i style="background:${l.color}"></i>${l.label}</span>`).join('')
+    + `<span style="margin-left:auto;opacity:.7">← ${span} →</span>`;
 }
 
 // Build the legend (one row per defined kind) after a program is parsed.
@@ -1587,6 +1767,7 @@ function buildLegend() {
     el.appendChild(row);
     kindCountEls[k] = ct;
   }
+  buildStatsKinds();   // keep the stats-panel kind list in sync with the loaded program
 }
 
 // ---------------------------------------------------------------------------
@@ -1805,6 +1986,7 @@ async function createGPUEngine() {
 // Main loop
 // ---------------------------------------------------------------------------
 let lastT = performance.now();
+let lastUiMs = 0;
 let fpsAccum = 0, fpsFrames = 0;
 const fpsEl = document.getElementById('fps');
 
@@ -1856,7 +2038,11 @@ function animate() {
   controls.update();
   renderer.render(scene, camera);
   updateDebugTooltip();                 // live action-list inspector while D is held
-  if (kindTipEl && kindTipEl.style.display === 'block') updateKindTip();   // live per-kind activity stats
+  if (now - lastUiMs > 200) {           // refresh hover tooltip + stats panel a few times a second
+    lastUiMs = now;
+    if (kindTipEl && kindTipEl.style.display === 'block') updateKindTip();
+    if (statsOpen) updateStatsPanel();
+  }
 
   fpsAccum += frameDt; fpsFrames++;
   if (fpsAccum >= 0.5) { fpsEl.textContent = Math.round(fpsFrames / fpsAccum); fpsAccum = 0; fpsFrames = 0; }
@@ -2024,6 +2210,24 @@ pauseBtn.addEventListener('click', () => { stepToAction = false; setPaused(!cfg.
 document.getElementById('next').addEventListener('click', () => {
   stepToAction = true; stepFrames = 0; setPaused(false);
 });
+
+// Stats panel controls.
+const spHorizonEl = document.getElementById('spHorizon');
+const spCustomWrap = document.getElementById('spCustomWrap');
+const spCustomEl = document.getElementById('spCustom');
+const spMetricEl = document.getElementById('spMetric');
+function setStatsOpen(o) { statsOpen = o; statsPanelEl.style.display = o ? 'block' : 'none'; if (o) updateStatsPanel(); }
+document.getElementById('stats').addEventListener('click', () => setStatsOpen(!statsOpen));
+document.getElementById('spClose').addEventListener('click', () => setStatsOpen(false));
+function readHorizon() {
+  const v = parseInt(spHorizonEl.value, 10);
+  if (v === -1) { spCustomWrap.style.display = ''; spHorizonSec = Math.max(5, parseInt(spCustomEl.value, 10) || 60); }
+  else { spCustomWrap.style.display = 'none'; spHorizonSec = v; }
+  updateStatsPanel();
+}
+spHorizonEl.addEventListener('change', readHorizon);
+spCustomEl.addEventListener('input', () => { if (parseInt(spHorizonEl.value, 10) === -1) { spHorizonSec = Math.max(5, parseInt(spCustomEl.value, 10) || 60); updateStatsPanel(); } });
+spMetricEl.addEventListener('change', () => { spMetric = spMetricEl.value; updateStatsPanel(); });
 
 document.getElementById('shadows').addEventListener('change', e => { cfg.shadows = e.target.checked; keyLight.castShadow = cfg.shadows; });
 document.getElementById('showBonds').addEventListener('change', e => { cfg.showBonds = e.target.checked; rebuildBondLines(); });
@@ -2273,6 +2477,13 @@ window.__dbg = {
   get gpu() { return !!gpu; },
   tick() { return runPhysics(); },          // drive one physics+VM frame (used by tests)
   sync() { return syncInstances(); },       // push matrices/colors to the instance buffers (used by tests)
+  forceSample() { sampleHistory(); },       // record one history sample now (used by tests)
+  get histLen() { return histLen; },
+  histSeries(name, which, n) {
+    const k = kindIndex.get(name); if (k == null) return null;
+    const src = which === 'bonded' ? histBonded : which === 'actions' ? histActions : histTotal;
+    return histKindSeries(k, src, n);
+  },
   inspect(i) { return debugHtml(i); },      // the debug tooltip's HTML for ball i
   kindCount(name) { let c = 0; const k = kindIndex.get(name); for (let i = 0; i < ballCount; i++) if (kindId[i] === k) c++; return c; },
   actStats(name) {
