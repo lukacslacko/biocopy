@@ -311,6 +311,8 @@
         <select id="spMetric">
           <option value="count" selected>count (total &amp; bonded)</option>
           <option value="actions">actions / min</option>
+          <option value="chainlen">chain-length histogram</option>
+          <option value="chains">chains: count &amp; avg length</option>
         </select>
       </label>
     </div>
@@ -526,20 +528,29 @@ const HIST_CAP = 3600;
 const histTotal = new Float32Array(HIST_CAP * MAX_KINDS);
 const histBonded = new Float32Array(HIST_CAP * MAX_KINDS);
 const histActions = new Float32Array(HIST_CAP * MAX_KINDS);
+const histChainCount = new Float32Array(HIST_CAP);   // global per-second chain series
+const histChainEnd = new Float32Array(HIST_CAP);     // chains that contain an End
+const histChainAvg = new Float32Array(HIST_CAP);     // average chain length
 let histHead = 0, histLen = 0;   // ring write position; number of valid samples
 
 function resetStats() {
   actTotal.fill(0); actRing.fill(0);
   statsElapsedMs = 0; statsLastNow = -1; statsCurSec = 0; statsBucket = 0;
-  histTotal.fill(0); histBonded.fill(0); histActions.fill(0); histHead = 0; histLen = 0;
+  histTotal.fill(0); histBonded.fill(0); histActions.fill(0);
+  histChainCount.fill(0); histChainEnd.fill(0); histChainAvg.fill(0);
+  histHead = 0; histLen = 0;
 }
 function recordAction(k) { actTotal[k]++; actRing[k * STAT_NB + statsBucket]++; }
-function sampleHistory() {                          // snapshot the current per-kind counts + cumulative actions
-  const base = histHead * MAX_KINDS;
+function sampleHistory() {                          // snapshot the current per-kind counts + cumulative actions + chain stats
+  const slot = histHead, base = slot * MAX_KINDS;
   for (let k = 0; k < MAX_KINDS; k++) { histTotal[base + k] = 0; histBonded[base + k] = 0; }
   for (let i = 0; i < ballCount; i++) { const k = kindId[i]; histTotal[base + k]++; if (hasAnyBond(i)) histBonded[base + k]++; }
   for (let k = 0; k < MAX_KINDS; k++) histActions[base + k] = actTotal[k];
-  histHead = (histHead + 1) % HIST_CAP;
+  const ch = analyzeChains();
+  histChainCount[slot] = ch ? ch.count : 0;
+  histChainEnd[slot] = ch ? ch.endCount : 0;
+  histChainAvg[slot] = ch ? ch.avgLen : 0;
+  histHead = (slot + 1) % HIST_CAP;
   if (histLen < HIST_CAP) histLen++;
 }
 function advanceStats(now) {                       // call once per running frame
@@ -588,6 +599,57 @@ function plotSVG(series, w, h) {
     lines += `<polyline fill="none" stroke="${s.color}" stroke-width="1.5" points="${pts.trim()}"/>`;
   }
   return { svg: `<svg width="${w}" height="${h}" style="display:block">${lines}</svg>`, maxY };
+}
+// A global (not per-kind) per-second series for the most recent `nSamples`, oldest→newest.
+function histGlobalSeries(arr, nSamples) {
+  const m = Math.min(nSamples, histLen), out = new Array(m);
+  for (let s = 0; s < m; s++) out[s] = arr[(histHead - m + s + HIST_CAP * 2) % HIST_CAP];
+  return out;
+}
+// Analyze information chains: connected runs of ≥2 `Chain`-kind balls (a lone free
+// monomer is not a chain). Returns counts, average length, and length histograms for
+// all chains and for those that contain an `End`. Null if the program has no `Chain`.
+function analyzeChains() {
+  const ck = kindIndex.get('Chain');
+  if (ck == null) return null;
+  const chainSubs = kindSubtypes[ck], endK = kindIndex.get('End'), n = ballCount;
+  const isChain = i => chainSubs.has(kindId[i]);
+  for (let i = 0; i < n; i++) uf[i] = i;
+  const find = x => { while (uf[x] !== x) { uf[x] = uf[uf[x]]; x = uf[x]; } return x; };
+  for (let i = 0; i < n; i++) {
+    if (!isChain(i)) continue;
+    for (let k = 0; k < MAX_NBR; k++) { const j = nbr[i * MAX_NBR + k]; if (j > i && isChain(j)) { const ri = find(i), rj = find(j); if (ri !== rj) uf[ri] = rj; } }
+  }
+  const size = new Map(), hasEnd = new Map();
+  for (let i = 0; i < n; i++) {
+    if (!isChain(i)) continue;
+    const r = find(i);
+    size.set(r, (size.get(r) || 0) + 1);
+    if (endK != null && kindId[i] === endK) hasEnd.set(r, true);
+  }
+  let count = 0, endCount = 0, totalLen = 0, maxLen = 0;
+  const allBins = [], endBins = [];
+  for (const [r, s] of size) {
+    if (s < 2) continue;                              // a lone monomer is not a chain
+    count++; totalLen += s; if (s > maxLen) maxLen = s;
+    allBins[s] = (allBins[s] || 0) + 1;
+    if (hasEnd.get(r)) { endCount++; endBins[s] = (endBins[s] || 0) + 1; }
+  }
+  return { count, endCount, avgLen: count ? totalLen / count : 0, maxLen, allBins, endBins };
+}
+// Overlaid bar histogram: `all` chains (back, blue) and chains with an End (front, green).
+function histogramSVG(allBins, endBins, w, h) {
+  let maxLen = 0; for (let i = 0; i < allBins.length; i++) if (allBins[i]) maxLen = i;
+  if (maxLen < 1) maxLen = 1;
+  let maxCount = 1; for (let i = 1; i <= maxLen; i++) if ((allBins[i] || 0) > maxCount) maxCount = allBins[i];
+  const slot = w / maxLen, bw = Math.max(1, slot * 0.72), Y = c => (h - 1 - (c / maxCount) * (h - 2));
+  let bars = '';
+  for (let L = 1; L <= maxLen; L++) {
+    const a = allBins[L] || 0, e = endBins[L] || 0, x = (L - 1) * slot + (slot - bw) / 2;
+    if (a > 0) bars += `<rect x="${x.toFixed(1)}" y="${Y(a).toFixed(1)}" width="${bw.toFixed(1)}" height="${(h - 1 - Y(a)).toFixed(1)}" fill="#6ea8fe" opacity="0.5"/>`;
+    if (e > 0) bars += `<rect x="${x.toFixed(1)}" y="${Y(e).toFixed(1)}" width="${bw.toFixed(1)}" height="${(h - 1 - Y(e)).toFixed(1)}" fill="#7ee787"/>`;
+  }
+  return { svg: `<svg width="${w}" height="${h}" style="display:block">${bars}</svg>`, maxCount, maxLen };
 }
 const drifting = new Uint8Array(MAX_BALLS * MAX_LISTS);   // 1 while this list's `drift` is running
 const swimSince = new Float64Array(MAX_BALLS * MAX_LISTS); // time the current swim began (for the stuck timeout)
@@ -1715,6 +1777,34 @@ function buildStatsKinds() {                        // a colored checkbox per ki
 function updateStatsPanel() {
   if (!statsOpen || !spPlotEl) return;
   const nSamples = spHorizonSec <= 0 ? histLen : Math.min(histLen, spHorizonSec);
+  const horizonLabel = spHorizonSec <= 0 ? `all (${nSamples}s)` : (spHorizonSec >= 60 ? `${(spHorizonSec / 60).toFixed(spHorizonSec % 60 ? 1 : 0)} min` : `${spHorizonSec}s`);
+  const isChainMetric = spMetric === 'chainlen' || spMetric === 'chains';
+  if (spKindsEl) spKindsEl.style.display = isChainMetric ? 'none' : '';   // kinds are irrelevant to chain metrics
+
+  // Chain-length histogram (a live snapshot of the current chains, not a time series).
+  if (spMetric === 'chainlen') {
+    const ch = analyzeChains();
+    if (!ch) { spPlotEl.innerHTML = '<div class="sp-ymax">no Chain kind in this program</div>'; spLegendEl.innerHTML = ''; return; }
+    const { svg, maxCount, maxLen } = histogramSVG(ch.allBins, ch.endBins, 392, 150);
+    spPlotEl.innerHTML = `<div class="sp-ymax">${maxCount}</div>${svg}`;
+    spLegendEl.innerHTML = `<span><i style="background:#6ea8fe;opacity:.5"></i>all chains</span><span><i style="background:#7ee787"></i>with End</span>`
+      + `<span style="margin-left:auto;opacity:.7">length 1…${maxLen} →</span>`;
+    return;
+  }
+  // Chains over time: number of chains, number complete (with End), average length.
+  if (spMetric === 'chains') {
+    const series = [
+      { values: histGlobalSeries(histChainCount, nSamples), color: '#6ea8fe', label: '# chains' },
+      { values: histGlobalSeries(histChainEnd, nSamples), color: '#7ee787', label: '# with End' },
+      { values: histGlobalSeries(histChainAvg, nSamples), color: '#ffb454', label: 'avg length' },
+    ];
+    const { svg, maxY } = plotSVG(series, 392, 150);
+    spPlotEl.innerHTML = `<div class="sp-ymax">${maxY >= 10 ? Math.round(maxY) : maxY.toFixed(1)}</div>${svg}`;
+    spLegendEl.innerHTML = series.map(l => `<span><i style="background:${l.color}"></i>${l.label}</span>`).join('')
+      + `<span style="margin-left:auto;opacity:.7">← ${horizonLabel} →</span>`;
+    return;
+  }
+
   const sel = [...spSelKinds].filter(k => k < kindList.length);
   const series = [], legend = [], colOf = k => '#' + kindColor(kindList[k]).getHexString();
   if (spMetric === 'count') {
@@ -1731,10 +1821,9 @@ function updateStatsPanel() {
   }
   const { svg, maxY } = plotSVG(series, 392, 150);
   const fmtY = maxY >= 10 ? Math.round(maxY).toLocaleString('en-US') : maxY.toFixed(1);
-  const span = spHorizonSec <= 0 ? `all (${nSamples}s)` : (spHorizonSec >= 60 ? `${(spHorizonSec / 60).toFixed(spHorizonSec % 60 ? 1 : 0)} min` : `${spHorizonSec}s`);
   spPlotEl.innerHTML = `<div class="sp-ymax">${fmtY}</div>${svg}`;
   spLegendEl.innerHTML = legend.map(l => `<span><i style="background:${l.color}"></i>${l.label}</span>`).join('')
-    + `<span style="margin-left:auto;opacity:.7">← ${span} →</span>`;
+    + `<span style="margin-left:auto;opacity:.7">← ${horizonLabel} →</span>`;
 }
 
 // Build the legend (one row per defined kind) after a program is parsed.
@@ -2484,6 +2573,8 @@ window.__dbg = {
     const src = which === 'bonded' ? histBonded : which === 'actions' ? histActions : histTotal;
     return histKindSeries(k, src, n);
   },
+  chainStats() { return analyzeChains(); },
+  chainSeries(which, n) { return histGlobalSeries(which === 'end' ? histChainEnd : which === 'avg' ? histChainAvg : histChainCount, n); },
   inspect(i) { return debugHtml(i); },      // the debug tooltip's HTML for ball i
   kindCount(name) { let c = 0; const k = kindIndex.get(name); for (let i = 0; i < ballCount; i++) if (kindId[i] === k) c++; return c; },
   actStats(name) {
