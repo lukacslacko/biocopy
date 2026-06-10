@@ -202,7 +202,7 @@ The panel loads `copy.prog`, lists its scenarios, and shows live stats:
 | **Scenario** | Pick a scenario from the loaded program; selecting one (re)spawns it. |
 | **Run scenario** | Respawn the selected scenario. |
 | **Reload program** | Re-fetch and re-parse the currently selected program (edit the file, click Reload). |
-| **Legend** | One row per kind with its color and a live ball count. |
+| **Legend** | One row per kind with its color and a live ball count. Hover a row to highlight those balls (rainbow + double size) and pop up an **activity tooltip**: actions executed and actions/second/ball, both since start and over the last minute. Totals and rates aggregate the kind plus its descendants (matching the count). |
 | **Render radius** | Drawn ball size only — cosmetic. |
 | **Interact radius** | Drives the sim: collision distance is `2 · interact`. |
 | **Bond length** | Bonded-center rest length (× interact radius). |

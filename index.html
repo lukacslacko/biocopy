@@ -147,6 +147,18 @@
   #dbg .row { white-space: pre-wrap; }
   #dbg .lbl { color: var(--accent-2); opacity: .85; }
   #dbg .cur { background: rgba(110,168,254,0.30); color: var(--ink); border-radius: 3px; }
+
+  /* Per-kind activity tooltip: hover a kind in the legend. */
+  #kindTip {
+    position: fixed; z-index: 60; pointer-events: none; display: none; max-width: 320px;
+    background: rgba(10, 12, 18, 0.95);
+    border: 1px solid var(--panel-border); border-radius: 9px;
+    padding: 8px 10px; box-shadow: 0 10px 36px rgba(0,0,0,.55);
+    font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--ink-dim);
+  }
+  #kindTip .hdr { color: var(--ink); font-weight: 650; margin-bottom: 5px; }
+  #kindTip .k { color: var(--accent); }
+  #kindTip b { color: var(--ink); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -248,6 +260,7 @@
 <div id="stats">balls <b id="ballCount">0</b> · molecules <b id="molCount">0</b> · bonds <b id="bondCount">0</b> · <b id="fps">0</b> fps · <b id="mode">…</b></div>
 <div id="hint"><span class="hint-dim">drag empty space to orbit · scroll to zoom · right-drag to pan · hold <b>D</b> over a ball to inspect</span></div>
 <div id="dbg"></div>
+<div id="kindTip"></div>
 
 <script type="importmap">
 {
@@ -440,6 +453,23 @@ const bindSlot  = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);
 const bindTarget = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);
 const bindWantKind = new Int32Array(MAX_BALLS * MAX_LISTS).fill(-1);  // kindFind binds lock onto this kind
 const bindFilter = new Array(MAX_BALLS * MAX_LISTS).fill(null);       // optional candidate predicate for a `slot = Kind[filter]` swim
+
+// Per-kind activity stats (DSL actions executed). actTotal = since spawn; actRing is a
+// rolling window of STAT_NB one-second buckets for the "last minute". Time is the sim's
+// active running time — paused frames don't advance it (capped per frame to skip the gap).
+const STAT_NB = 60;
+const actTotal = new Float64Array(MAX_KINDS);
+const actRing = new Float64Array(MAX_KINDS * STAT_NB);
+let statsElapsedMs = 0, statsLastNow = -1, statsCurSec = 0, statsBucket = 0;
+function resetStats() { actTotal.fill(0); actRing.fill(0); statsElapsedMs = 0; statsLastNow = -1; statsCurSec = 0; statsBucket = 0; }
+function recordAction(k) { actTotal[k]++; actRing[k * STAT_NB + statsBucket]++; }
+function advanceStats(now) {                       // call once per running frame
+  if (statsLastNow >= 0) { let d = now - statsLastNow; if (d < 0) d = 0; else if (d > 250) d = 250; statsElapsedMs += d; }
+  statsLastNow = now;
+  const sec = Math.floor(statsElapsedMs / 1000);
+  while (statsCurSec < sec) { statsCurSec++; const b = statsCurSec % STAT_NB; for (let k = 0; k < MAX_KINDS; k++) actRing[k * STAT_NB + b] = 0; }
+  statsBucket = statsCurSec % STAT_NB;
+}
 const drifting = new Uint8Array(MAX_BALLS * MAX_LISTS);   // 1 while this list's `drift` is running
 const swimSince = new Float64Array(MAX_BALLS * MAX_LISTS); // time the current swim began (for the stuck timeout)
 const findMiss = new Uint8Array(MAX_BALLS * MAX_LISTS);   // 1 while a `slot = Kind` keeps finding no candidate
@@ -992,6 +1022,7 @@ function spawnScenario(name) {
   inActive.fill(0);
   bond.fill(-1); nbr.fill(-1); seekTarget.fill(-1); pc.fill(-1); vmStatus.fill(0); driftDir.fill(0); drifting.fill(0); driftUntil.fill(0); driftDirty = true;
   swimSince.fill(0); findMiss.fill(0); reshuffles = 0;
+  resetStats();
 
   const R = Math.max(2, cfg.containR - 2 * cfg.interact);
   const L0 = cfg.bondLen * cfg.interact;
@@ -1255,6 +1286,7 @@ function tickList(self, l, instrs, now) {
   let ip = pc[idx];
   if (ip < 0 || ip >= instrs.length) ip = pc[idx] = 0;
   const res = execInstr(self, l, instrs[ip], now);
+  if (res !== 'retry') recordAction(kindId[self]);   // a real action ran (retry = couldn't act yet → not counted)
   if (res === 'block' || res === 'retry') return;
   if (res === 'next') { pc[idx] = ip + 1; if (pc[idx] >= instrs.length) pc[idx] = 0; }
   // 'jump' already set pc
@@ -1275,6 +1307,7 @@ function stepBall(self, now) {
 let seekDirtyForGPU = false, driftDirty = false;
 function updatePrograms(now) {
   if (!activeList.length) return;
+  advanceStats(now);
   for (let e = 0; e < activeList.length; e++) stepBall(activeList[e], now);
   // Expire drift forces on time (a low-weight `drift` list may not be rolled again for
   // a long while, so we must stop its force here rather than waiting for the list to wake).
@@ -1497,6 +1530,30 @@ function refreshCounts() {
   }
 }
 
+// Live per-kind activity tooltip (shown while a legend row is hovered). Totals and
+// per-ball rates are aggregated over the kind + its descendants (matching the count).
+const kindTipEl = document.getElementById('kindTip');
+function updateKindTip() {
+  const k = hoverKind;
+  if (k < 0 || !kindTipEl) return;
+  const subs = kindSubtypes[k];
+  let nBalls = 0; for (let i = 0; i < ballCount; i++) if (subs.has(kindId[i])) nBalls++;
+  let total = 0, lastMin = 0;
+  for (const j of subs) {
+    total += actTotal[j];
+    for (let b = 0; b < STAT_NB; b++) lastMin += actRing[j * STAT_NB + b];
+  }
+  const elapsed = Math.max(0.001, statsElapsedMs / 1000);
+  const windowSec = Math.max(0.001, Math.min(elapsed, STAT_NB));
+  const rateAll = nBalls > 0 ? total / elapsed / nBalls : 0;
+  const rateMin = nBalls > 0 ? lastMin / windowSec / nBalls : 0;
+  const num = n => Math.round(n).toLocaleString('en-US');
+  kindTipEl.innerHTML =
+    `<div class="hdr"><span class="k">${kindList[k]}</span> · ${nBalls} ball${nBalls === 1 ? '' : 's'}</div>` +
+    `<div>all time — <b>${num(total)}</b> actions · <b>${rateAll.toFixed(2)}</b> /s/ball</div>` +
+    `<div>last ${Math.round(windowSec)}s — <b>${num(lastMin)}</b> actions · <b>${rateMin.toFixed(2)}</b> /s/ball</div>`;
+}
+
 // Build the legend (one row per defined kind) after a program is parsed.
 function buildLegend() {
   const el = document.getElementById('legend');
@@ -1511,9 +1568,19 @@ function buildLegend() {
     const ct = document.createElement('span'); ct.className = 'ct'; ct.textContent = '0';
     row.appendChild(sw); row.appendChild(nm); row.appendChild(ct);
     row.style.cursor = 'default';
-    const kid = k;   // hovering a row highlights that kind's balls (rainbow + double size)
-    row.addEventListener('mouseenter', () => { hoverKind = kid; colorsDirty = true; });
-    row.addEventListener('mouseleave', () => { if (hoverKind === kid) { hoverKind = -1; colorsDirty = true; } });
+    const kid = k;   // hovering a row highlights that kind's balls (rainbow + double size) and shows its stats
+    row.addEventListener('mouseenter', () => {
+      hoverKind = kid; colorsDirty = true;
+      const r = row.getBoundingClientRect();
+      kindTipEl.style.left = (r.right + 10) + 'px';
+      kindTipEl.style.top = r.top + 'px';
+      kindTipEl.style.display = 'block';
+      updateKindTip();
+    });
+    row.addEventListener('mouseleave', () => {
+      if (hoverKind === kid) { hoverKind = -1; colorsDirty = true; }
+      kindTipEl.style.display = 'none';
+    });
     el.appendChild(row);
     kindCountEls[k] = ct;
   }
@@ -1786,6 +1853,7 @@ function animate() {
   controls.update();
   renderer.render(scene, camera);
   updateDebugTooltip();                 // live action-list inspector while D is held
+  if (kindTipEl && kindTipEl.style.display === 'block') updateKindTip();   // live per-kind activity stats
 
   fpsAccum += frameDt; fpsFrames++;
   if (fpsAccum >= 0.5) { fpsEl.textContent = Math.round(fpsFrames / fpsAccum); fpsAccum = 0; fpsFrames = 0; }
@@ -2204,6 +2272,13 @@ window.__dbg = {
   sync() { return syncInstances(); },       // push matrices/colors to the instance buffers (used by tests)
   inspect(i) { return debugHtml(i); },      // the debug tooltip's HTML for ball i
   kindCount(name) { let c = 0; const k = kindIndex.get(name); for (let i = 0; i < ballCount; i++) if (kindId[i] === k) c++; return c; },
+  actStats(name) {
+    const k = kindIndex.get(name); if (k == null) return null;
+    const subs = kindSubtypes[k]; let total = 0, lastMin = 0, nBalls = 0;
+    for (let i = 0; i < ballCount; i++) if (subs.has(kindId[i])) nBalls++;
+    for (const j of subs) { total += actTotal[j]; for (let b = 0; b < STAT_NB; b++) lastMin += actRing[j * STAT_NB + b]; }
+    return { total, lastMin, nBalls, elapsedMs: statsElapsedMs };
+  },
   molecules() {
     for (let i = 0; i < ballCount; i++) uf[i] = i;
     const find = x => { while (uf[x] !== x) { uf[x] = uf[uf[x]]; x = uf[x]; } return x; };
