@@ -189,6 +189,18 @@
   #statsPanel .sp-plot { position: relative; background: rgba(255,255,255,0.03); border-radius: 6px; padding: 4px; }
   #statsPanel .sp-ymax { position: absolute; top: 4px; left: 6px; color: var(--ink-dim); opacity: .7; font-variant-numeric: tabular-nums; }
   #statsPanel .sp-xspan { text-align: right; color: var(--ink-dim); opacity: .7; margin-top: 2px; }
+  #statsPanel .sp-plot { cursor: crosshair; }
+
+  /* Datapoint tooltip while hovering the stats plot. */
+  #spTip {
+    position: fixed; z-index: 80; pointer-events: none; display: none; white-space: nowrap;
+    background: rgba(10, 12, 18, 0.97); border: 1px solid var(--panel-border); border-radius: 7px;
+    padding: 6px 8px; box-shadow: 0 8px 28px rgba(0,0,0,.55);
+    font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--ink-dim);
+  }
+  #spTip .hdr { color: var(--ink); font-weight: 650; margin-bottom: 3px; }
+  #spTip b { color: var(--ink); font-weight: 600; }
+  #spTip i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; margin-right: 4px; vertical-align: -1px; }
 </style>
 </head>
 <body>
@@ -321,6 +333,7 @@
     <div class="sp-legend" id="spLegend"></div>
   </div>
 </div>
+<div id="spTip"></div>
 
 <script type="importmap">
 {
@@ -1784,11 +1797,13 @@ function updateStatsPanel() {
   // Chain-length histogram (a live snapshot of the current chains, not a time series).
   if (spMetric === 'chainlen') {
     const ch = analyzeChains();
-    if (!ch) { spPlotEl.innerHTML = '<div class="sp-ymax">no Chain kind in this program</div>'; spLegendEl.innerHTML = ''; return; }
+    if (!ch) { spPlotEl.innerHTML = '<div class="sp-ymax">no Chain kind in this program</div>'; spLegendEl.innerHTML = ''; spPlotModel = null; return; }
     const { svg, maxCount, maxLen } = histogramSVG(ch.allBins, ch.endBins, 392, 150);
     spPlotEl.innerHTML = `<div class="sp-ymax">${maxCount}</div>${svg}`;
     spLegendEl.innerHTML = `<span><i style="background:#6ea8fe;opacity:.5"></i>all chains</span><span><i style="background:#7ee787"></i>with End</span>`
       + `<span style="margin-left:auto;opacity:.7">length 1…${maxLen} →</span>`;
+    spPlotModel = { type: 'hist', maxLen, allBins: ch.allBins, endBins: ch.endBins };
+    refreshSpTip();
     return;
   }
   // Chains over time: number of chains, number complete (with End), average length.
@@ -1802,28 +1817,68 @@ function updateStatsPanel() {
     spPlotEl.innerHTML = `<div class="sp-ymax">${maxY >= 10 ? Math.round(maxY) : maxY.toFixed(1)}</div>${svg}`;
     spLegendEl.innerHTML = series.map(l => `<span><i style="background:${l.color}"></i>${l.label}</span>`).join('')
       + `<span style="margin-left:auto;opacity:.7">← ${horizonLabel} →</span>`;
+    spPlotModel = { type: 'time', n: series[0].values.length, nowSec: statsCurSec, series };
+    refreshSpTip();
     return;
   }
 
   const sel = [...spSelKinds].filter(k => k < kindList.length);
-  const series = [], legend = [], colOf = k => '#' + kindColor(kindList[k]).getHexString();
+  const series = [], colOf = k => '#' + kindColor(kindList[k]).getHexString();
   if (spMetric === 'count') {
     if (sel.length === 1) {                          // single kind → total + of-which-bonded
       const k = sel[0], c = colOf(k);
-      series.push({ values: histKindSeries(k, histTotal, nSamples), color: c });
-      series.push({ values: histKindSeries(k, histBonded, nSamples), color: '#e6edf3' });
-      legend.push({ color: c, label: kindList[k] + ' total' }, { color: '#e6edf3', label: 'bonded' });
+      series.push({ values: histKindSeries(k, histTotal, nSamples), color: c, label: kindList[k] + ' total' });
+      series.push({ values: histKindSeries(k, histBonded, nSamples), color: '#e6edf3', label: 'bonded' });
     } else for (const k of sel) {                    // multiple kinds → one total line each
-      const c = colOf(k); series.push({ values: histKindSeries(k, histTotal, nSamples), color: c }); legend.push({ color: c, label: kindList[k] });
+      series.push({ values: histKindSeries(k, histTotal, nSamples), color: colOf(k), label: kindList[k] });
     }
   } else {                                           // actions / min
-    for (const k of sel) { const c = colOf(k); series.push({ values: diffSeries(histKindSeries(k, histActions, nSamples), 60), color: c }); legend.push({ color: c, label: kindList[k] }); }
+    for (const k of sel) series.push({ values: diffSeries(histKindSeries(k, histActions, nSamples), 60), color: colOf(k), label: kindList[k] });
   }
   const { svg, maxY } = plotSVG(series, 392, 150);
   const fmtY = maxY >= 10 ? Math.round(maxY).toLocaleString('en-US') : maxY.toFixed(1);
   spPlotEl.innerHTML = `<div class="sp-ymax">${fmtY}</div>${svg}`;
-  spLegendEl.innerHTML = legend.map(l => `<span><i style="background:${l.color}"></i>${l.label}</span>`).join('')
+  spLegendEl.innerHTML = series.map(l => `<span><i style="background:${l.color}"></i>${l.label}</span>`).join('')
     + `<span style="margin-left:auto;opacity:.7">← ${horizonLabel} →</span>`;
+  spPlotModel = { type: 'time', n: series.length ? series[0].values.length : 0, nowSec: statsCurSec, series };
+  refreshSpTip();
+}
+
+// Tooltip over the stats plot: map the cursor's x to a datapoint and show its details
+// (time + each series' value for line plots; length + all/with-End counts for the histogram).
+let spPlotModel = null, spTipX = 0, spTipY = 0, spTipShown = false;
+const spTipEl = document.getElementById('spTip');
+function refreshSpTip() {
+  if (!spTipShown || !spPlotModel || !spPlotEl || !spTipEl) return;
+  const svg = spPlotEl.querySelector && spPlotEl.querySelector('svg');
+  if (!svg) { spTipEl.style.display = 'none'; return; }
+  const r = svg.getBoundingClientRect();
+  const xpx = spTipX - r.left;
+  if (r.width <= 0 || xpx < 0 || xpx > r.width) { spTipEl.style.display = 'none'; return; }
+  const frac = Math.max(0, Math.min(1, xpx / r.width));
+  let html;
+  if (spPlotModel.type === 'hist') {
+    const L = Math.max(1, Math.min(spPlotModel.maxLen, 1 + Math.floor(frac * spPlotModel.maxLen)));
+    const a = spPlotModel.allBins[L] || 0, e = spPlotModel.endBins[L] || 0;
+    html = `<div class="hdr">length ${L}</div>`
+      + `<div><i style="background:#6ea8fe;opacity:.6"></i>all: <b>${a}</b></div>`
+      + `<div><i style="background:#7ee787"></i>with End: <b>${e}</b></div>`;
+  } else {
+    const n = spPlotModel.n;
+    if (n < 1) { spTipEl.style.display = 'none'; return; }
+    const i = Math.max(0, Math.min(n - 1, Math.round(frac * (n - 1))));
+    const ago = (n - 1) - i, tsec = spPlotModel.nowSec - ago;
+    html = `<div class="hdr">t = ${tsec}s · ${ago === 0 ? 'now' : ago + 's ago'}</div>`;
+    for (const s of spPlotModel.series) {
+      const v = s.values[i];
+      const vs = v == null ? '–' : (Math.abs(v - Math.round(v)) < 1e-6 ? Math.round(v) : v.toFixed(2));
+      html += `<div><i style="background:${s.color}"></i>${s.label || ''}: <b>${vs}</b></div>`;
+    }
+  }
+  spTipEl.innerHTML = html;
+  spTipEl.style.display = 'block';
+  spTipEl.style.left = (spTipX + 14) + 'px';
+  spTipEl.style.top = (spTipY + 14) + 'px';
 }
 
 // Build the legend (one row per defined kind) after a program is parsed.
@@ -2317,6 +2372,8 @@ function readHorizon() {
 spHorizonEl.addEventListener('change', readHorizon);
 spCustomEl.addEventListener('input', () => { if (parseInt(spHorizonEl.value, 10) === -1) { spHorizonSec = Math.max(5, parseInt(spCustomEl.value, 10) || 60); updateStatsPanel(); } });
 spMetricEl.addEventListener('change', () => { spMetric = spMetricEl.value; updateStatsPanel(); });
+spPlotEl.addEventListener('mousemove', e => { spTipX = e.clientX; spTipY = e.clientY; spTipShown = true; refreshSpTip(); });
+spPlotEl.addEventListener('mouseleave', () => { spTipShown = false; if (spTipEl) spTipEl.style.display = 'none'; });
 
 document.getElementById('shadows').addEventListener('change', e => { cfg.shadows = e.target.checked; keyLight.castShadow = cfg.shadows; });
 document.getElementById('showBonds').addEventListener('change', e => { cfg.showBonds = e.target.checked; rebuildBondLines(); });
