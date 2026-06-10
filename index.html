@@ -1280,13 +1280,16 @@ function tickList(self, l, instrs, now) {
       else { if (seekTarget[self] === oldT) seekTarget[self] = -1; bindTarget[idx] = -1; vmStatus[idx] = VM_RUN; }  // nothing else — re-find/retry
       return;
     }
-    if (swimTick(self, l) === 'done') { pc[idx]++; if (pc[idx] >= instrs.length) pc[idx] = 0; }
+    if (swimTick(self, l) === 'done') { recordAction(kindId[self]); pc[idx]++; if (pc[idx] >= instrs.length) pc[idx] = 0; }   // the bind finished → one action
     return;                                          // 'abort' re-runs the bind next time; 'wait' keeps swimming
   }
   let ip = pc[idx];
   if (ip < 0 || ip >= instrs.length) ip = pc[idx] = 0;
   const res = execInstr(self, l, instrs[ip], now);
-  if (res !== 'retry') recordAction(kindId[self]);   // a real action ran (retry = couldn't act yet → not counted)
+  // Count an action only when it *finishes* and the pointer moves on. 'block' (a swim
+  // just started) and 'retry' (couldn't act yet) stay on the same line — a swim is
+  // counted later, on completion (see above) — so neither counts here.
+  if (res === 'next' || res === 'jump') recordAction(kindId[self]);
   if (res === 'block' || res === 'retry') return;
   if (res === 'next') { pc[idx] = ip + 1; if (pc[idx] >= instrs.length) pc[idx] = 0; }
   // 'jump' already set pc
