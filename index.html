@@ -392,6 +392,18 @@ function kindColor(name) {
   kindColorCache.set(name, c);
   return c;
 }
+// A washed-out version of a kind's color, for inert free-floating balls (unbound +
+// programless) so the active agents and assembled structures stand out from the soup.
+const kindColorMutedCache = new Map();
+const _hsl = { h: 0, s: 0, l: 0 };
+function kindColorMuted(name) {
+  let c = kindColorMutedCache.get(name);
+  if (c) return c;
+  kindColor(name).getHSL(_hsl);
+  c = new THREE.Color().setHSL(_hsl.h, _hsl.s * 0.18, Math.min(0.78, _hsl.l + 0.10));   // nearly gray, a touch lighter
+  kindColorMutedCache.set(name, c);
+  return c;
+}
 
 // ---------------------------------------------------------------------------
 // Per-ball state (fixed-capacity flat arrays). Balls are created at spawn and
@@ -1289,6 +1301,7 @@ function gridKey(ix, iy, iz) { return ix + ',' + iy + ',' + iz; }
 const force = new Float32Array(MAX_BALLS * 3);
 
 function isBonded(i, j) { for (let k = 0; k < MAX_NBR; k++) if (nbr[i * MAX_NBR + k] === j) return true; return false; }
+function hasAnyBond(i) { for (let k = 0; k < MAX_NBR; k++) if (nbr[i * MAX_NBR + k] >= 0) return true; return false; }
 
 function step(dt) {
   const n = ballCount;
@@ -1400,7 +1413,12 @@ function syncInstances() {
   instMesh.instanceMatrix.needsUpdate = true;
 
   if (colorsDirty) {
-    for (let i = 0; i < n; i++) { tmpColor.copy(kindColor(kindList[kindId[i]])); instMesh.setColorAt(i, tmpColor); }
+    for (let i = 0; i < n; i++) {
+      const name = kindList[kindId[i]];
+      // Inert soup — no program and no bonds — is drawn washed-out so structures pop.
+      const col = (!inActive[i] && !hasAnyBond(i)) ? kindColorMuted(name) : kindColor(name);
+      tmpColor.copy(col); instMesh.setColorAt(i, tmpColor);
+    }
     if (instMesh.instanceColor) instMesh.instanceColor.needsUpdate = true;
     colorsDirty = false;
   }
@@ -2183,6 +2201,7 @@ window.__dbg = {
   spawn(name) { spawnScenario(name); },
   get gpu() { return !!gpu; },
   tick() { return runPhysics(); },          // drive one physics+VM frame (used by tests)
+  sync() { return syncInstances(); },       // push matrices/colors to the instance buffers (used by tests)
   inspect(i) { return debugHtml(i); },      // the debug tooltip's HTML for ball i
   kindCount(name) { let c = 0; const k = kindIndex.get(name); for (let i = 0; i < ballCount; i++) if (kindId[i] === k) c++; return c; },
   molecules() {
