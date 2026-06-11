@@ -2201,7 +2201,7 @@ function animate() {
 // Known program files, name -> source descriptor:
 //   { kind:'url' }  → fetched by name each load (so editing the file + Reload picks up changes)
 //   { kind:'text', text } → an in-memory snapshot (a file picked from disk on file://, no live reload)
-const progFiles = new Map([['copy.prog', { kind: 'url' }], ['copy_fine.prog', { kind: 'url' }]]);
+const progFiles = new Map([['copy.prog', { kind: 'url' }], ['copy_synth.prog', { kind: 'url' }]]);
 let currentProgFile = 'copy.prog';
 
 // Best-effort directory listing: works on servers that auto-index (nginx, `python -m

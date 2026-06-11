@@ -1,0 +1,323 @@
+/*
+Each ball has the following things:
+
+	- a kind, which is the `Kind` in `ball Kind {};`.
+	- some balls it is bound to, eg 
+	  `ball Kind { ...  next: SomeKind; ...};`
+	- kinds can match multiple kinds, like 
+	  `{ ... next: SomeKind | OtherKind; ... }`.
+	- some actions.
+
+Each ball may have a list of actions, which it starts executing at the top
+and goes action by action.
+
+Note that eventually taking actions will require some kind of energy or the
+like, plus material as well, so that balls will need to be larger, made of
+more material, to be able to have more  actions in its definition.
+
+Actions:
+
+`some_bond = some_ball`
+Bind a ball to a bond slot. If the other_ball is not very close, first swim
+to it to touch it, then bind it. Bonds are directed, it might very well be that
+a ball binds another ball, while the other ball does not bind the first
+ball. Can be one's own bond or some_other_ball.bond (where some other ball
+might be specified through a chain of bonds as well of course).
+
+`some_bond = release`
+Release a bond if it was bound.
+
+`some_state = NewState`
+Change state. Can be state for the ball's own state or some_ball.state for
+some other ball.
+
+`some_kind = NewKind`
+Change kind. Can be kind for the ball's own kind, or some_ball.kind for some
+other ball.
+
+`label:`
+The definition a label.
+
+`go label`
+Continue at label.
+
+`sleep time`
+Wait a bit.
+
+`if (condition) action`
+A conditional action. Condition can be equality of kind for example.
+
+Balls are specified either just by kind, in which case it finds a nearby
+such ball, or by a bond or chain of bonds (like original or original.next).
+
+Whenever non-existing balls are referenced, or incorrect types are bound in
+a bond, we log those but let the simulation keep on running.
+
+Balls can also inherit from another ball and modify the inherited behavior.
+
+Scenarios are defined by listing ball kinds. Whenever a kind is referenced,
+a new such ball is created.
+
+*/
+
+/*
+A generic material to be converted into useful stuff.
+*/
+ball Blank {};
+
+/*
+========================
+Information chain balls.
+========================
+*/
+ball Chain {};
+
+/*
+The first ball of the chain, does not carry information.
+*/
+ball Cap: Chain {
+	next: Info;
+};
+
+/*
+An information carrier in the middle of the chain.
+*/
+ball Info: Chain {
+	next: Info | End;
+	prev: Cap | Info;
+};
+
+/*
+Different kinds of information. These could be side chains as well, for
+simplicity, they are different balls now.
+*/
+ball Info_1 : Info {};
+ball Info_2 : Info {};
+ball Info_3 : Info {};
+
+/* 
+A terminating ball, carrying no information.
+*/
+ball End: Chain {
+	prev: Info;
+};
+
+/*
+====================
+A simple polymerase.
+====================
+*/
+ball Polymerase {
+	original: Chain;
+	material: Blank;
+	copy: Chain;
+
+	repel Polymerase 10;
+	speed 1;
+	retarget_after 4s;
+
+	{
+		material = release;
+		original = Cap[next];
+		copy = Cap[!next];
+		
+		clone:
+		material = original.next.kind[!prev];
+		copy.next = material;
+		material.prev = copy;
+		copy = material;
+		original = original.next;
+		if (original.next) go clone;					
+	};
+};
+
+ball Monomerase {
+	chain: Chain;
+	next: Chain;
+	
+	speed 0.1;
+	repel Polymerase 8;
+	retarget_after 5s;
+
+	{
+		drift 5s;
+		if (!chain.next) chain = Cap;
+		next = chain.next;
+		replace chain with chain.kind;
+		chain = next;
+	};
+};
+
+/*
+Digests unended information.
+*/
+ball EndlessDigester {
+	chain: Chain;
+	next: Chain;
+
+	speed 0.1;
+	retarget_after 5s;
+
+	repel Polymerase 8;
+	{
+		drift 2s;
+		if (!chain.prev) chain = Info[prev && !next];
+		next = chain.prev;
+		replace chain with chain.kind;
+		chain = next;
+	}
+};
+
+/*
+Digests unconnected chain pieces.
+*/
+ball OrphanDigester {
+	chain: Chain;
+
+	speed 0.1;
+	retarget_after 5s;
+
+	repel Polymerase 8;
+	repel EndlessDigester 8;
+
+	{
+		drift 2s;
+		chain = Chain[!prev && !next];
+		replace chain with Blank;
+	}
+};
+
+/*
+Chain piece synthesizer.
+*/
+ball ChainSynthesizer {
+	blank: Blank;
+	
+	repel OrphanDigester 8;
+	repel Polymerase 8;
+
+	{
+		blank = Blank;
+		replace blank with Cap;
+	}
+	{
+		blank = Blank;
+		replace blank with End;
+	}
+	{
+		blank = Blank;
+		replace blank with Info_1;
+	}
+	{
+		blank = Blank;
+		replace blank with Info_2;
+	}
+	{
+		blank = Blank;
+		replace blank with Info_3;
+	}
+};
+
+scenario Test {
+	Cap * 100;
+	End * 100;
+	Info_1 * 500;
+	Info_2 * 500;
+	Info_3 * 500;
+	Polymerase * 5;
+	Monomerase * 2;
+	EndlessDigester;
+	chain = Cap;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = End;    chain.next.prev = chain;
+	chain = Cap;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = End;    chain.next.prev = chain;
+};
+
+scenario TestEndlessDigester {
+	Cap * 20;
+	End * 20;
+	Info_1 * 20;
+	Info_2 * 20;
+
+	EndlessDigester;
+
+	chain = Cap;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain = Cap;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain = Cap;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = End;    chain.next.prev = chain;
+	chain = Cap;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_1; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_2; chain.next.prev = chain; chain = chain.next;
+	chain.next = Info_3; chain.next.prev = chain; chain = chain.next;
+	chain.next = End;    chain.next.prev = chain;
+	
+};
