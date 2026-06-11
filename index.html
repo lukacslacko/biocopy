@@ -1880,8 +1880,15 @@ function refreshSpTip() {
   }
   spTipEl.innerHTML = html;
   spTipEl.style.display = 'block';
-  spTipEl.style.left = (spTipX + 14) + 'px';
-  spTipEl.style.top = (spTipY + 14) + 'px';
+  // Keep the tooltip on-screen: flip to the other side of the cursor near an edge, then clamp.
+  const tw = spTipEl.offsetWidth, th = spTipEl.offsetHeight, pad = 6;
+  let left = spTipX + 14, top = spTipY + 14;
+  if (left + tw > window.innerWidth - pad) left = spTipX - 14 - tw;
+  if (top + th > window.innerHeight - pad) top = spTipY - 14 - th;
+  left = Math.max(pad, Math.min(left, window.innerWidth - tw - pad));
+  top = Math.max(pad, Math.min(top, window.innerHeight - th - pad));
+  spTipEl.style.left = left + 'px';
+  spTipEl.style.top = top + 'px';
 }
 
 // Build the legend (one row per defined kind) after a program is parsed.
