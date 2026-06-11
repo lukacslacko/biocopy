@@ -469,24 +469,27 @@ const kindColorCache = new Map();
 function kindColor(name) {
   let c = kindColorCache.get(name);
   if (c) return c;
+  if (name === 'Blank') { c = new THREE.Color(1, 1, 1); kindColorCache.set(name, c); return c; }   // raw material is white
   let h = 2166136261 >>> 0;
   for (let i = 0; i < name.length; i++) { h ^= name.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
   const hue = (h % 360) / 360;
-  const sat = 0.50 + ((h >>> 10) % 35) / 100;   // 0.50 .. 0.85
-  const lit = 0.48 + ((h >>> 18) % 22) / 100;   // 0.48 .. 0.70
+  const sat = 0.72 + ((h >>> 10) % 28) / 100;   // 0.72 .. 1.00 — vivid, not pastel
+  const lit = 0.46 + ((h >>> 18) % 16) / 100;   // 0.46 .. 0.62
   c = new THREE.Color().setHSL(hue, sat, lit);
   kindColorCache.set(name, c);
   return c;
 }
-// A washed-out version of a kind's color, for inert free-floating balls (unbound +
-// programless) so the active agents and assembled structures stand out from the soup.
+// A softer version of a kind's color, for inert free-floating balls (unbound +
+// programless): same hue, just less saturated than the connected pieces — so the
+// loose soup still reads as colored, while assembled structures pop.
 const kindColorMutedCache = new Map();
 const _hsl = { h: 0, s: 0, l: 0 };
 function kindColorMuted(name) {
   let c = kindColorMutedCache.get(name);
   if (c) return c;
+  if (name === 'Blank') { c = new THREE.Color(1, 1, 1); kindColorMutedCache.set(name, c); return c; }   // Blank stays white
   kindColor(name).getHSL(_hsl);
-  c = new THREE.Color().setHSL(_hsl.h, _hsl.s * 0.18, Math.min(0.78, _hsl.l + 0.10));   // nearly gray, a touch lighter
+  c = new THREE.Color().setHSL(_hsl.h, _hsl.s * 0.5, _hsl.l);   // half the saturation, same hue/lightness
   kindColorMutedCache.set(name, c);
   return c;
 }

@@ -14,10 +14,11 @@ copies. It's a fork of the ball-and-spring look & feel from
 
 - **Balls.** Every ball has:
   - a **kind** — a name like `Blank`, `Cap`, `Info_1`, `Polymerase`. The kind
-    determines the ball's color (a deterministic hash of the name) and, if the kind
-    has a program, its behavior. Inert free-floating balls — *unbound* and
-    *programless* (raw material like loose `Blank`s) — are drawn washed-out, so the
-    active agents and assembled structures stand out from the soup.
+    determines the ball's color (a deterministic, vivid hash of the name; `Blank` raw
+    material is white) and, if the kind has a program, its behavior. Inert
+    free-floating balls — *unbound* and *programless* — are drawn at half saturation
+    (same hue, softer), so assembled structures and active agents pop while the loose
+    soup still reads as colored.
   - **named bond slots** — e.g. a `Polymerase` has `original`, `material`, `copy`;
     a chain monomer has `next` and `prev`. Bonds are **directed**: a slot points
     *from* this ball *to* another. A back-link is a separate bond in the other
